@@ -529,7 +529,7 @@ def _global_rates_block():
       <h3 style="margin:0 0 10px;font-size:14px;color:#2c3e50">🌐 글로벌 금리 & 시장 지표 (실시간)</h3>
       <table style="border-collapse:collapse;width:100%"><tbody>{rows}</tbody></table>
       <p style="font-size:11px;color:#95a5a6;margin:6px 0 0">
-        ※ 연준 기준금리는 코드 상수 (FOMC 후 수동 업데이트). 국채·VIX·DXY는 yfinance 실시간.
+        ※ 연준 기준금리: FRED 실시간 조회 우선 (실패 시 코드 상수로 대체). 국채·VIX·DXY는 yfinance 실시간.
       </p>
     </div>'''
 

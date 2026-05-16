@@ -38,7 +38,7 @@ _SECTOR_ETF = {
     'Basic Materials':        ('XLB',  'Materials Select',   ['LIN','APD','SHW','FCX','NEM','NUE','ALB','DD','ECL','VMC']),
 }
 
-_HIGHER_BETTER = {'ROE', 'RevGrowth', 'GrossM', 'OpM', 'NetM', 'FCFMargin', 'FCFYield', 'EpsGrowth', 'CurrRatio'}
+_HIGHER_BETTER = {'ROE', 'ROIC', 'RevGrowth', 'GrossM', 'OpM', 'NetM', 'FCFMargin', 'FCFYield', 'EpsGrowth', 'CurrRatio'}
 
 # ── 섹터/산업별 밸류에이션 임계값 ─────────────────────────────────────────────
 # PER/PSR/PBR: (good, ok) — ≤good=우수, ≤ok=보통, else=고평가
@@ -118,6 +118,7 @@ def _peer_avgs(peers, exclude):
     gross_ms, op_ms, net_ms, ev_ebitdas = [], [], [], []
     betas, curr_ratios, eps_growths = [], [], []
     fcf_yields, fcf_margins = [], []
+    pegs, roics, net_debt_ebitdas = [], [], []
 
     for info in infos.values():
         roes.append(_safe(info, 'returnOnEquity', mult=100))
@@ -139,6 +140,21 @@ def _peer_avgs(peers, exclude):
         rev  = info.get('totalRevenue')
         fcf_yields.append(round(fcf / mcap * 100, 2) if (fcf and mcap and mcap > 0) else None)
         fcf_margins.append(round(fcf / rev  * 100, 2) if (fcf and rev  and rev  > 0) else None)
+        # PEG
+        _per = _safe(info, 'trailingPE')
+        _eg  = _safe(info, 'earningsGrowth', mult=100)
+        pegs.append(round(_per / _eg, 2) if (_per and _eg and _eg > 0 and _per > 0) else None)
+        # ROIC
+        _ebit = info.get('ebit')
+        _tax  = info.get('effectiveTaxRate') or 0.21
+        _eq   = info.get('totalStockholderEquity') or 0
+        _debt = info.get('totalDebt') or 0
+        _cash = info.get('totalCash') or 0
+        _ic   = _eq + _debt - _cash
+        roics.append(round(_ebit * (1 - _tax) / _ic * 100, 2) if (_ebit is not None and _ic > 0) else None)
+        # Net Debt / EBITDA
+        _ebitda = info.get('ebitda')
+        net_debt_ebitdas.append(round((_debt - _cash) / _ebitda, 2) if (_ebitda and _ebitda > 0) else None)
 
     return {
         'ROE': avg(roes), 'PER': avg(pers), 'PSR': avg(psrs),
@@ -146,6 +162,7 @@ def _peer_avgs(peers, exclude):
         'GrossM': avg(gross_ms), 'OpM': avg(op_ms), 'NetM': avg(net_ms),
         'EV_EBITDA': avg(ev_ebitdas), 'Beta': avg(betas), 'CurrRatio': avg(curr_ratios),
         'FCFYield': avg(fcf_yields), 'FCFMargin': avg(fcf_margins), 'EpsGrowth': avg(eps_growths),
+        'PEG': avg(pegs), 'ROIC': avg(roics), 'NetDebtEBITDA': avg(net_debt_ebitdas),
     }
 
 
@@ -257,6 +274,24 @@ def _grade(val, metric, sector='', industry=''):
         if val >= 0:   return '#e74c3c', f'저성장 ({val}% < 5%)', True
         return             '#c0392b', f'역성장 ({val}%)', True
 
+    if metric == 'PEG':
+        if val <= 0:   return '#c0392b', f'비정상 (PEG ≤ 0)', True
+        if val <= 1:   return '#27ae60', f'저평가 ({val} ≤ 1.0) — 성장 대비 싸다', False
+        if val <= 2:   return '#f39c12', f'적정 ({val} / 1.0~2.0)', False
+        return             '#e74c3c', f'고평가 ({val} > 2.0)', True
+
+    if metric == 'ROIC':
+        if val >= 15:  return '#27ae60', f'우수 ({val}% ≥ 15%)', False
+        if val >= 10:  return '#f39c12', f'보통 ({val}% / 10~15%)', False
+        if val >= 0:   return '#e74c3c', f'낮음 ({val}% < 10%)', True
+        return             '#c0392b', f'적자 (ROIC {val}%)', True
+
+    if metric == 'NetDebtEBITDA':
+        if val < 0:    return '#27ae60', f'순현금 ({val}x) — 무부채', False
+        if val <= 2:   return '#27ae60', f'안전 ({val}x ≤ 2)', False
+        if val <= 4:   return '#f39c12', f'보통 ({val}x / 2~4)', False
+        return             '#e74c3c', f'위험 ({val}x > 4)', True
+
     return '#95a5a6', str(val), False
 
 
@@ -283,27 +318,46 @@ def analyze_financials(ticker, info):
     fcf_yield  = round(fcf / mcap_v * 100, 2) if (fcf and mcap_v and mcap_v > 0) else None
     fcf_margin = round(fcf / rev_v  * 100, 2) if (fcf and rev_v  and rev_v  > 0) else None
 
+    # PEG: PER ÷ EPS성장률 (성장 대비 가격 적정성)
+    peg = round(per / eps_growth, 2) if (per and eps_growth and eps_growth > 0 and per > 0) else None
+
+    # ROIC: NOPAT ÷ 투하자본 (자본 효율성 — 부채 포함 관점)
+    ebit_v     = info.get('ebit')
+    tax_rate_v = info.get('effectiveTaxRate') or 0.21
+    eq_v       = info.get('totalStockholderEquity') or 0
+    total_debt_v = info.get('totalDebt') or 0
+    total_cash_v = info.get('totalCash') or 0
+    invested_cap = eq_v + total_debt_v - total_cash_v
+    roic = round(ebit_v * (1 - tax_rate_v) / invested_cap * 100, 2) if (ebit_v is not None and invested_cap > 0) else None
+
+    # 순부채/EBITDA: 레버리지 질적 지표
+    ebitda_v = info.get('ebitda')
+    net_debt_ebitda = round((total_debt_v - total_cash_v) / ebitda_v, 2) if (ebitda_v and ebitda_v > 0) else None
+
     # (label, key, val, desc)  |  key='__H__' → 섹션 헤더, val=bg색, desc=제목
     metrics = [
         ('__H__', '__H__', '#2c3e50',  '📊 밸류에이션'),
-        ('PER',               'PER',       per,        '주가수익비율 — 낮을수록 저평가'),
-        ('PSR',               'PSR',       psr,        '주가매출비율 — 낮을수록 저평가'),
-        ('PBR',               'PBR',       pbr,        '주가순자산비율 — 낮을수록 저평가'),
-        ('EV / EBITDA',       'EV_EBITDA', ev_ebitda,  '부채 포함 기업가치 ÷ EBITDA — 자본구조 무관 밸류에이션'),
+        ('PER',               'PER',          per,            '주가수익비율 — 낮을수록 저평가'),
+        ('PEG',               'PEG',          peg,            'PER ÷ EPS성장률 — 1 이하=성장 대비 저평가, 2 초과=고평가'),
+        ('PSR',               'PSR',          psr,            '주가매출비율 — 낮을수록 저평가'),
+        ('PBR',               'PBR',          pbr,            '주가순자산비율 — 낮을수록 저평가'),
+        ('EV / EBITDA',       'EV_EBITDA',    ev_ebitda,      '부채 포함 기업가치 ÷ EBITDA — 자본구조 무관 밸류에이션'),
         ('__H__', '__H__', '#27ae60',  '💰 수익성 & 현금창출'),
-        ('ROE (%)',            'ROE',       roe,        '자기자본이익률 — 높을수록 자본 효율 우수'),
-        ('매출총이익률 (%)',    'GrossM',    gross_m,    '가격경쟁력 지표 — 원가 통제력'),
-        ('영업이익률 (%)',      'OpM',       op_m,       '핵심 사업 수익성 — 비용 통제력'),
-        ('순이익률 (%)',        'NetM',      net_m,      '최종 이익률 — 회계 조정 후 실질 수익'),
-        ('FCF 마진 (%)',        'FCFMargin', fcf_margin, '잉여현금흐름 ÷ 매출 — 진짜 현금창출력'),
-        ('FCF 수익률 (%)',      'FCFYield',  fcf_yield,  'FCF ÷ 시가총액 — 5%↑ 채권 대비 매력적'),
+        ('ROE (%)',            'ROE',          roe,            '자기자본이익률 — 높을수록 자본 효율 우수'),
+        ('ROIC (%)',           'ROIC',         roic,           'NOPAT ÷ 투하자본 — 부채 포함 자본효율, 15%↑ 우수'),
+        ('매출총이익률 (%)',    'GrossM',       gross_m,        '가격경쟁력 지표 — 원가 통제력'),
+        ('영업이익률 (%)',      'OpM',          op_m,           '핵심 사업 수익성 — 비용 통제력'),
+        ('순이익률 (%)',        'NetM',         net_m,          '최종 이익률 — 회계 조정 후 실질 수익'),
+        ('FCF 마진 (%)',        'FCFMargin',    fcf_margin,     '잉여현금흐름 ÷ 매출 — 진짜 현금창출력'),
+        ('FCF 수익률 (%)',      'FCFYield',     fcf_yield,      'FCF ÷ 시가총액 — 5%↑ 채권 대비 매력적'),
         ('__H__', '__H__', '#3498db',  '🚀 성장성'),
-        ('매출 성장률 YoY (%)', 'RevGrowth', rev_growth, '전년 대비 매출 증가율 — 20%↑ 고성장주'),
-        ('EPS 성장률 YoY (%)',  'EpsGrowth', eps_growth, '전년 대비 주당순이익 증가율'),
+        ('매출 성장률 YoY (%)', 'RevGrowth',    rev_growth,     '전년 대비 매출 증가율 — 20%↑ 고성장주'),
+        ('EPS 성장률 YoY (%)',  'EpsGrowth',    eps_growth,     '전년 대비 주당순이익 증가율'),
         ('__H__', '__H__', '#e67e22',  '🛡️ 재무 안정성 & 리스크'),
-        ('부채비율 D/E',        'DE',        de,         '부채÷자본 — 낮을수록 안전 (고금리 환경 특히 중요)'),
-        ('베타 (β)',            'Beta',      beta,       '시장 대비 변동성 — 1.0=시장동행 / 1.5↑=고변동'),
-        ('유동비율',            'CurrRatio', curr_ratio, '유동자산÷유동부채 — 1.0 미만 시 단기 유동성 위험'),
+        ('부채비율 D/E',        'DE',           de,             '부채÷자본 — 낮을수록 안전 (고금리 환경 특히 중요)'),
+        ('순부채/EBITDA',       'NetDebtEBITDA',net_debt_ebitda,'(총부채-현금)÷EBITDA — 2 이하=안전, 4 초과=위험'),
+        ('베타 (β)',            'Beta',         beta,           '시장 대비 변동성 — 1.0=시장동행 / 1.5↑=고변동'),
+        ('유동비율',            'CurrRatio',    curr_ratio,     '유동자산÷유동부채 — 1.0 미만 시 단기 유동성 위험'),
     ]
 
     # ── 섹터 ETF 피어 평균 로딩 ───────────────────────────────

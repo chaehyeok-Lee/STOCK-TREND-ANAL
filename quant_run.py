@@ -77,8 +77,12 @@ for ticker in tickers:
             print(f"⚠️ {ticker}: 재무제표 불량 또는 누락 (에러 처리)")
             continue
 
-        # 모멘텀: 6개월·12개월 수익률 (주가 이력 추가 호출)
-        mom_6m = mom_12m = None
+        # 퀄리티: 매출총이익률 (Gross Margin %)
+        gm = info.get('grossMargins', None)
+        gross_m = round(gm * 100, 2) if gm is not None else None
+
+        # 모멘텀 + 저변동성: 1년 주가 이력 1회 호출로 함께 계산
+        mom_6m = mom_12m = ann_vol = None
         try:
             hist = stock.history(period='1y')
             if not hist.empty:
@@ -87,6 +91,9 @@ for ticker in tickers:
                 p12 = hist['Close'].iloc[0]
                 mom_6m  = round((cur - p6)  / p6  * 100, 2)
                 mom_12m = round((cur - p12) / p12 * 100, 2)
+                if len(hist) >= 20:
+                    daily_ret = hist['Close'].pct_change().dropna()
+                    ann_vol = round(daily_ret.std() * (252 ** 0.5) * 100, 2)
         except Exception:
             pass
 
@@ -97,8 +104,10 @@ for ticker in tickers:
             'PER':      round(per, 2),
             'PSR':      round(psr, 2),
             'PBR':      round(pbr, 2),
+            'GrossM':   gross_m,
             'MOM_6M':   mom_6m,
             'MOM_12M':  mom_12m,
+            'ANN_VOL':  ann_vol,
         })
         print(f"✅ {ticker} 데이터 수집 완료")
 
@@ -112,23 +121,34 @@ if not valid_stocks:
 else:
     df = pd.DataFrame(valid_stocks)
 
-    # 모멘텀 컬럼 NaN 처리 (못 받은 종목)
-    df['MOM_6M']  = pd.to_numeric(df['MOM_6M'],  errors='coerce')
-    df['MOM_12M'] = pd.to_numeric(df['MOM_12M'], errors='coerce')
-    has_mom = df['MOM_6M'].notna().sum() >= len(df) * 0.5  # 절반 이상 데이터 있을 때만 반영
+    # 숫자형 변환 및 데이터 충분 여부 판단 (종목의 절반 이상 데이터 있을 때만 팩터 반영)
+    for col in ['MOM_6M', 'MOM_12M', 'GrossM', 'ANN_VOL']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    has_mom     = df['MOM_6M'].notna().sum()  >= len(df) * 0.5
+    has_quality = df['GrossM'].notna().sum()  >= len(df) * 0.5
+    has_vol     = df['ANN_VOL'].notna().sum() >= len(df) * 0.5
 
-    # 가중치: 가치(80%) + 모멘텀(20%) — 데이터 없으면 가치 100%
-    if has_mom:
-        W = {'ROE': 0.24, 'PER': 0.24, 'PSR': 0.16, 'PBR': 0.16, 'MOM': 0.20}
-    else:
-        W = {'ROE': 0.30, 'PER': 0.30, 'PSR': 0.20, 'PBR': 0.20, 'MOM': 0.00}
+    # 가중치: 가치(45%) + 퀄리티(20%) + 모멘텀(20%) + 저변동성(15%)
+    # 데이터 부족한 팩터는 비율을 가치에 재배분
+    W = {'ROE': 0.135, 'PER': 0.135, 'PSR': 0.09, 'PBR': 0.09,
+         'MOM': 0.20 if has_mom else 0.0,
+         'QUALITY': 0.20 if has_quality else 0.0,
+         'LOWVOL': 0.15 if has_vol else 0.0}
+    # 잔여 비중을 ROE/PER에 균등 보충
+    assigned = sum(W.values())
+    if assigned < 1.0:
+        gap = round((1.0 - assigned) / 2, 4)
+        W['ROE'] += gap
+        W['PER']  += gap
 
     def _mark(val, metric):
         if metric == 'ROE':    return '🟢' if val >= 15   else '🔴'
         if metric == 'PER':    return '🟢' if val <= 15   else '🔴'
         if metric == 'PSR':    return '🟢' if val <= 3    else '🔴'
         if metric == 'PBR':    return '🟢' if val <= 1.5  else '🔴'
+        if metric == 'GrossM': return '🟢' if val >= 50   else ('🟡' if val >= 30 else '🔴')
         if metric == 'MOM_6M': return '🟢' if val >= 10  else ('🟡' if val >= 0 else '🔴')
+        if metric == 'ANN_VOL':return '🟢' if val <= 25  else ('🟡' if val <= 40 else '🔴')
         return '─'
 
     def _print_top10(top_df, score_col):
@@ -140,17 +160,26 @@ else:
                 m12 = row['MOM_12M'] if pd.notna(row.get('MOM_12M')) else None
                 m12_s = f' / 12M {m12:+.1f}%' if m12 is not None else ''
                 mom_str = f'   모멘텀: {_mark(m6,"MOM_6M")} 6M {m6:+.1f}%{m12_s}'
+            quality_str = ''
+            if has_quality and pd.notna(row.get('GrossM')):
+                quality_str = f'   총이익률: {_mark(row["GrossM"],"GrossM")} {row["GrossM"]}%'
+            vol_str = ''
+            if has_vol and pd.notna(row.get('ANN_VOL')):
+                vol_str = f'   연변동성: {_mark(row["ANN_VOL"],"ANN_VOL")} {row["ANN_VOL"]}%'
             print(f"  {rank:>2}위. [{row['종목코드']}] {row['기업명']}"
                   f"  →  종합점수: {row[score_col]:.1f} / 100점")
             print(f"       ROE: {_mark(row['ROE'],'ROE')} {row['ROE']}%"
                   f"   PER: {_mark(row['PER'],'PER')} {row['PER']}"
                   f"   PSR: {_mark(row['PSR'],'PSR')} {row['PSR']}"
-                  f"   PBR: {_mark(row['PBR'],'PBR')} {row['PBR']}{mom_str}")
-            print(f"       개별점수 → ROE:{row['ROE_점수']:.0f}점  "
-                  f"PER:{row['PER_점수']:.0f}점  "
-                  f"PSR:{row['PSR_점수']:.0f}점  "
-                  f"PBR:{row['PBR_점수']:.0f}점"
-                  + (f"  MOM:{row.get('MOM_점수',0):.0f}점" if has_mom else ''))
+                  f"   PBR: {_mark(row['PBR'],'PBR')} {row['PBR']}{mom_str}{quality_str}{vol_str}")
+            score_line = (f"       개별점수 → ROE:{row['ROE_점수']:.0f}점  "
+                          f"PER:{row['PER_점수']:.0f}점  "
+                          f"PSR:{row['PSR_점수']:.0f}점  "
+                          f"PBR:{row['PBR_점수']:.0f}점")
+            if has_mom:     score_line += f"  MOM:{row.get('MOM_점수',0):.0f}점"
+            if has_quality: score_line += f"  QUAL:{row.get('QUAL_점수',0):.0f}점"
+            if has_vol:     score_line += f"  VOL:{row.get('VOL_점수',0):.0f}점"
+            print(score_line)
             print("  " + "-" * 70)
 
     # ════════════════════════════════════════════════════════════════════
@@ -159,25 +188,39 @@ else:
     #            (군집 내 상대 위치 평가 → 항상 TOP10 도출됨)
     # ════════════════════════════════════════════════════════════════════
     df_a = df.copy()
-    df_a['ROE_점수'] = df_a['ROE'].rank(pct=True) * 100
-    df_a['PER_점수'] = (1 - df_a['PER'].rank(pct=True)) * 100
-    df_a['PSR_점수'] = (1 - df_a['PSR'].rank(pct=True)) * 100
-    df_a['PBR_점수'] = (1 - df_a['PBR'].rank(pct=True)) * 100
+    df_a['ROE_점수']  = df_a['ROE'].rank(pct=True) * 100
+    df_a['PER_점수']  = (1 - df_a['PER'].rank(pct=True)) * 100
+    df_a['PSR_점수']  = (1 - df_a['PSR'].rank(pct=True)) * 100
+    df_a['PBR_점수']  = (1 - df_a['PBR'].rank(pct=True)) * 100
     if has_mom:
         mom_composite = df_a[['MOM_6M','MOM_12M']].mean(axis=1)
         df_a['MOM_점수'] = mom_composite.rank(pct=True) * 100
     else:
         df_a['MOM_점수'] = 0
+    if has_quality:
+        df_a['QUAL_점수'] = df_a['GrossM'].rank(pct=True) * 100
+    else:
+        df_a['QUAL_점수'] = 0
+    if has_vol:
+        df_a['VOL_점수'] = (1 - df_a['ANN_VOL'].rank(pct=True)) * 100  # 낮을수록 좋음
+    else:
+        df_a['VOL_점수'] = 0
     df_a['종합점수_A'] = (
-        W['ROE'] * df_a['ROE_점수'] +
-        W['PER'] * df_a['PER_점수'] +
-        W['PSR'] * df_a['PSR_점수'] +
-        W['PBR'] * df_a['PBR_점수'] +
-        W['MOM'] * df_a['MOM_점수']
+        W['ROE']     * df_a['ROE_점수'] +
+        W['PER']     * df_a['PER_점수'] +
+        W['PSR']     * df_a['PSR_점수'] +
+        W['PBR']     * df_a['PBR_점수'] +
+        W['MOM']     * df_a['MOM_점수'] +
+        W['QUALITY'] * df_a['QUAL_점수'] +
+        W['LOWVOL']  * df_a['VOL_점수']
     )
     top10_a = df_a.sort_values('종합점수_A', ascending=False).head(10)
 
-    mom_note = '가치80%+모멘텀20%' if has_mom else '가치100% (모멘텀 데이터 부족)'
+    factor_parts = ['가치45%']
+    if has_quality: factor_parts.append('퀄리티20%')
+    if has_mom:     factor_parts.append('모멘텀20%')
+    if has_vol:     factor_parts.append('저변동성15%')
+    mom_note = '+'.join(factor_parts)
     print("\n" + "=" * 70)
     print(f"📊 [방법 A] 퍼센타일 가중 점수법   TOP 10  |  섹터: {sector_name}")
     print(f"📌 가중치: {mom_note}  |  섹터 내 상대 위치 평가")
@@ -219,22 +262,46 @@ else:
         if v >= -15: return 30
         return 10
 
+    def _quality_score(v):
+        if pd.isna(v): return 50
+        if v >= 60:  return 100
+        if v >= 40:  return 75
+        if v >= 20:  return 45
+        return 20
+
+    def _vol_score(v):
+        if pd.isna(v): return 50
+        if v <= 20:  return 100  # 변동성 낮을수록 우수
+        if v <= 30:  return 75
+        if v <= 45:  return 45
+        return 20
+
     df_b = df.copy()
-    df_b['ROE_점수'] = df_b['ROE'].apply(_roe_score)
-    df_b['PER_점수'] = df_b['PER'].apply(_per_score)
-    df_b['PSR_점수'] = df_b['PSR'].apply(_psr_score)
-    df_b['PBR_점수'] = df_b['PBR'].apply(_pbr_score)
+    df_b['ROE_점수']  = df_b['ROE'].apply(_roe_score)
+    df_b['PER_점수']  = df_b['PER'].apply(_per_score)
+    df_b['PSR_점수']  = df_b['PSR'].apply(_psr_score)
+    df_b['PBR_점수']  = df_b['PBR'].apply(_pbr_score)
     if has_mom:
         mom_avg = df_b[['MOM_6M','MOM_12M']].mean(axis=1)
         df_b['MOM_점수'] = mom_avg.apply(_mom_score)
     else:
         df_b['MOM_점수'] = 0
+    if has_quality:
+        df_b['QUAL_점수'] = df_b['GrossM'].apply(_quality_score)
+    else:
+        df_b['QUAL_점수'] = 0
+    if has_vol:
+        df_b['VOL_점수'] = df_b['ANN_VOL'].apply(_vol_score)
+    else:
+        df_b['VOL_점수'] = 0
     df_b['종합점수_B'] = (
-        W['ROE'] * df_b['ROE_점수'] +
-        W['PER'] * df_b['PER_점수'] +
-        W['PSR'] * df_b['PSR_점수'] +
-        W['PBR'] * df_b['PBR_점수'] +
-        W['MOM'] * df_b['MOM_점수']
+        W['ROE']     * df_b['ROE_점수'] +
+        W['PER']     * df_b['PER_점수'] +
+        W['PSR']     * df_b['PSR_점수'] +
+        W['PBR']     * df_b['PBR_점수'] +
+        W['MOM']     * df_b['MOM_점수'] +
+        W['QUALITY'] * df_b['QUAL_점수'] +
+        W['LOWVOL']  * df_b['VOL_점수']
     )
     top10_b = df_b.sort_values('종합점수_B', ascending=False).head(10)
 

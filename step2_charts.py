@@ -98,6 +98,11 @@ def _price(ax, df, spx_slice, ticker, label, use_candle):
     plt.setp(ax.get_xticklabels(), visible=False)
 
 
+def _obv_line(close, volume):
+    direction = np.sign(close.diff().fillna(0))
+    return (direction * volume).cumsum()
+
+
 def _volume(ax, df):
     if 'Volume' not in df.columns or df['Volume'].isna().all():
         ax.text(0.5, 0.5, '거래량 데이터 없음', transform=ax.transAxes,
@@ -114,6 +119,17 @@ def _volume(ax, df):
     ax.set_ylabel('거래량', fontsize=8)
     ax.yaxis.set_major_formatter(
         plt.FuncFormatter(lambda x, _: f'{x/1e6:.0f}M' if x >= 1e6 else f'{x:.0f}'))
+
+    # OBV (기관 누적매수/매도 신호) — 우측 축
+    ax_obv = ax.twinx()
+    obv = _obv_line(df['Close'], df['Volume'])
+    ax_obv.plot(df.index, obv, color='#9b59b6', linewidth=1.0, alpha=0.75, label='OBV')
+    ax_obv.set_ylabel('OBV', fontsize=7, color='#9b59b6')
+    ax_obv.tick_params(axis='y', labelcolor='#9b59b6', labelsize=7)
+    ax_obv.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f'{x/1e6:.0f}M' if abs(x) >= 1e6 else f'{x:.0f}'))
+    ax_obv.legend(fontsize=7, loc='upper right')
+
     plt.setp(ax.get_xticklabels(), visible=False)
 
 
@@ -264,8 +280,8 @@ def _draw(ticker, df, spx_slice, label, use_candle):
 
 # ── 기울기 & 교점 텍스트 요약 ────────────────────────────────────────────────
 
-def _slope_summary_html(df, ticker, n_slope=10):
-    """이평선 기울기 방향 + 최근 교점 분석 HTML 반환"""
+def _slope_summary_html(df, ticker, spx_close=None, n_slope=10):
+    """이평선 기울기 방향 + 최근 교점 + 기술적 종합점수 + RS 분석 HTML 반환"""
     close = df['Close']
 
     # 기울기 계산
@@ -339,8 +355,79 @@ def _slope_summary_html(df, ticker, n_slope=10):
     if not cross_rows:
         cross_rows = '<tr><td colspan="4" style="padding:8px;color:#95a5a6;font-size:12px;text-align:center">해당 기간 내 교점 없음</td></tr>'
 
+    # ── 기술적 종합점수 (0~100) ──────────────────────────────────────────────
+    cur_price = float(close.iloc[-1])
+    tech_score = 0
+    # MA 정배열 여부 (35점): 50>150>200=완전정배열, 50>200=부분
+    if all(w in ma_vals for w in [50, 200]):
+        if ma_vals[50] > ma_vals.get(150, 0) and ma_vals.get(150, 0) > ma_vals[200]:
+            tech_score += 35
+        elif ma_vals[50] > ma_vals[200]:
+            tech_score += 25
+        elif ma_vals[50] > ma_vals.get(150, 0):
+            tech_score += 15
+    # 현재가 vs 200MA (25점)
+    if 200 in ma_vals and cur_price > ma_vals[200]:
+        tech_score += 25
+    # MACD 크로스 (20점): MACD > Signal
+    try:
+        macd_line, sig_line, _ = _macd(close)
+        if float(macd_line.iloc[-1]) > float(sig_line.iloc[-1]):
+            tech_score += 20
+    except Exception:
+        pass
+    # RSI 40~65 최적구간 (20점)
+    try:
+        rsi_val = float(_rsi(close).iloc[-1])
+        if 40 <= rsi_val <= 65:
+            tech_score += 20
+        elif 30 <= rsi_val < 40 or 65 < rsi_val <= 70:
+            tech_score += 10
+    except Exception:
+        pass
+    ts_col = '#27ae60' if tech_score >= 70 else '#f39c12' if tech_score >= 45 else '#e74c3c'
+    ts_lbl = '강세' if tech_score >= 70 else '중립' if tech_score >= 45 else '약세'
+
+    tech_score_html = f'''
+    <div style="margin-top:12px;background:#fff;border:1px solid #ecf0f1;
+                border-radius:6px;padding:10px 14px;display:flex;align-items:center;gap:18px">
+      <span style="font-size:12px;font-weight:bold;color:#7f8c8d;white-space:nowrap">▸ 기술적 종합점수</span>
+      <span style="font-size:22px;font-weight:bold;color:{ts_col}">{tech_score} / 100</span>
+      <span style="background:{ts_col};color:white;border-radius:5px;
+                   padding:3px 12px;font-size:12px;font-weight:bold">{ts_lbl}</span>
+      <span style="font-size:11px;color:#95a5a6">MA정배열(35) + 200MA위(25) + MACD(20) + RSI(20)</span>
+    </div>'''
+
+    # ── S&P500 상대강도 (RS) ─────────────────────────────────────────────────
+    rs_html = ''
+    if spx_close is not None:
+        try:
+            spx_al = spx_close.reindex(close.index, method='ffill').dropna()
+            common = close.index.intersection(spx_al.index)
+            if len(common) > 63:
+                n = min(252, len(common))
+                stk_ret = (close.loc[common[-1]] / close.loc[common[-n]] - 1) * 100
+                spx_ret = (spx_al.loc[common[-1]] / spx_al.loc[common[-n]] - 1) * 100
+                rs_diff = round(stk_ret - spx_ret, 1)
+                period_lbl = '12개월' if n >= 252 else f'{n}거래일'
+                rs_col = '#27ae60' if rs_diff >= 0 else '#e74c3c'
+                rs_txt = f'S&P500 아웃퍼폼 ▲ ({period_lbl})' if rs_diff >= 0 else f'S&P500 언더퍼폼 ▼ ({period_lbl})'
+                rs_html = f'''
+    <div style="margin-top:8px;background:#fff;border:1px solid #ecf0f1;
+                border-radius:6px;padding:10px 14px">
+      <span style="font-size:12px;font-weight:bold;color:#7f8c8d">▸ S&P500 상대강도 (RS · {period_lbl})</span>
+      <div style="margin-top:6px;font-size:13px">
+        종목 수익률: <b style="color:#2c3e50">{stk_ret:+.1f}%</b> &nbsp;|&nbsp;
+        S&P500: <b style="color:#8e44ad">{spx_ret:+.1f}%</b> &nbsp;|&nbsp;
+        <span style="color:{rs_col};font-weight:bold">RS 차이: {rs_diff:+.1f}%</span>
+        &nbsp;—&nbsp; <span style="color:{rs_col}">{rs_txt}</span>
+      </div>
+    </div>'''
+        except Exception:
+            pass
+
     return f'''
-    <div style="font-family:Arial,sans-serif;max-width:900px;margin:10px 0 22px;
+    <div style="font-family:Arial,sans-serif;max-width:940px;margin:10px 0 22px;
                 background:#f8f9fa;border-radius:8px;padding:16px;
                 border:1px solid #dde4e9">
       <h4 style="margin:0 0 12px;color:#2c3e50;font-size:14px">
@@ -378,6 +465,8 @@ def _slope_summary_html(df, ticker, n_slope=10):
           </table>
         </div>
       </div>
+      {tech_score_html}
+      {rs_html}
       <p style="font-size:11px;color:#95a5a6;margin:8px 0 0">
         ※ 기울기: 최근 {n_slope}거래일 선형회귀 (1일당 달러 변화) &nbsp;|&nbsp;
         골든크로스: 50MA가 상위선 상향 돌파 &nbsp;|&nbsp; 데드크로스: 50MA가 하향 이탈
@@ -458,7 +547,7 @@ def analyze_charts(ticker, history_5y, spx_5y=None):
         spx_1y = (spx_close[spx_close.index >= df_1y.index[0]]
                   if spx_close is not None else None)
         _draw(ticker, df_1y, spx_1y, '1년 — 단기·중기 트렌드', True)
-        display(HTML(_slope_summary_html(df_1y, ticker)))
+        display(HTML(_slope_summary_html(df_1y, ticker, spx_close=spx_close)))
         print('  ✅ 1년 차트 출력 완료')
     else:
         print('  ⚠️ 1년: 데이터 부족')
