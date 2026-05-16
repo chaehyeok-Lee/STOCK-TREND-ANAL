@@ -42,8 +42,25 @@ def _rsi(close, period=14):
 
 # ── 서브플롯 그리기 ──────────────────────────────────────────────────────────
 
+def _bollinger(ax, close, window=20, num_std=2):
+    """볼린저밴드 (MA20 ± 2σ) — 음영 + 경계선"""
+    if len(close) < window:
+        return
+    ma  = close.rolling(window).mean()
+    std = close.rolling(window).std()
+    upper = ma + num_std * std
+    lower = ma - num_std * std
+    ax.fill_between(close.index, lower, upper,
+                    alpha=0.08, color='#95a5a6', label=f'BB({window},{num_std}σ)')
+    ax.plot(close.index, upper, color='#95a5a6', linewidth=0.7,
+            linestyle='--', alpha=0.65)
+    ax.plot(close.index, lower, color='#95a5a6', linewidth=0.7,
+            linestyle='--', alpha=0.65)
+
+
 def _price(ax, df, spx_slice, ticker, label, use_candle):
     close = df['Close']
+    _bollinger(ax, close)          # 볼린저밴드 — MA선 아래에 먼저 그림
 
     if use_candle:
         up = df[df['Close'] >= df['Open']]

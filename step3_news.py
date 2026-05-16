@@ -487,6 +487,74 @@ def _global_rates_block():
     return html
 
 
+def _insider_block(stock):
+    """내부자 거래 최근 10건 표시"""
+    try:
+        it = stock.insider_transactions if stock else None
+        if it is None or not isinstance(it, pd.DataFrame) or it.empty:
+            return ''
+
+        recent = it.head(10).copy()
+
+        rows = ''
+        for _, r in recent.iterrows():
+            name  = str(r.get('Insider',     r.get('Name',     'N/A')))
+            title = str(r.get('Title',       r.get('Position', '')))[:22]
+            tx    = str(r.get('Transaction', r.get('Type',     '')))
+            val   = r.get('Value',  r.get('Amount', None))
+            date  = str(r.get('Start Date',  r.get('Date',     '')))[:10]
+
+            is_buy  = any(w in tx for w in ('Purchase','Buy','Acquisition','Automatic Buy'))
+            is_sell = any(w in tx for w in ('Sale','Sell','Disposition','Automatic Sell'))
+            tx_col  = '#27ae60' if is_buy else '#e74c3c' if is_sell else '#7f8c8d'
+            tx_icon = '▲ 매수' if is_buy else '▼ 매도' if is_sell else tx[:8]
+
+            try:
+                val_f   = float(val) if val is not None else None
+                val_str = (f'${val_f/1e6:.1f}M' if val_f and abs(val_f) >= 1e6
+                           else f'${val_f:,.0f}' if val_f else 'N/A')
+            except Exception:
+                val_str = 'N/A'
+
+            rows += f'''
+            <tr style="border-bottom:1px solid #ecf0f1">
+              <td style="padding:5px 10px;font-size:12px;white-space:nowrap">{date}</td>
+              <td style="padding:5px 10px;font-size:12px;font-weight:bold">{name}</td>
+              <td style="padding:5px 10px;font-size:11px;color:#7f8c8d">{title}</td>
+              <td style="padding:5px 10px;font-size:12px;font-weight:bold;
+                         color:{tx_col};white-space:nowrap">{tx_icon}</td>
+              <td style="padding:5px 10px;font-size:12px;text-align:right">{val_str}</td>
+            </tr>'''
+
+        if not rows:
+            return ''
+
+        return f'''
+        <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
+          <h3 style="margin:0 0 10px;font-size:14px;color:#2c3e50">👤 내부자 거래 (최근 10건)</h3>
+          <table style="border-collapse:collapse;width:100%;
+                        border:1px solid #ecf0f1;border-radius:4px;overflow:hidden">
+            <thead>
+              <tr style="background:#2c3e50;color:white;font-size:12px">
+                <th style="padding:6px 10px;text-align:left">날짜</th>
+                <th style="padding:6px 10px;text-align:left">임직원</th>
+                <th style="padding:6px 10px;text-align:left">직책</th>
+                <th style="padding:6px 10px">구분</th>
+                <th style="padding:6px 10px">금액</th>
+              </tr>
+            </thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <p style="font-size:11px;color:#95a5a6;margin:6px 0 0">
+            ※ 임원의 자사주 <span style="color:#27ae60;font-weight:bold">▲매수</span> =
+            내부 신뢰 신호 &nbsp;|&nbsp;
+            대량 <span style="color:#e74c3c;font-weight:bold">▼매도</span> = 주의 신호
+          </p>
+        </div>'''
+    except Exception:
+        return ''
+
+
 def _eps_block(next_eps_date, eps_history, analyst, info):
     n = analyst['n_analysts']
     if n == 0:
@@ -760,6 +828,7 @@ def analyze_news(ticker, info, raw_news,
 
       {_eps_block(next_eps_dt, eps_hist, analyst, info)}
       {_dividend_block(info, raw_dividends)}
+      {_insider_block(stock)}
       {_global_rates_block()}
       {_macro_block(upcoming)}
       {_sector_risk_block(sector, risks)}

@@ -38,7 +38,7 @@ _SECTOR_ETF = {
     'Basic Materials':        ('XLB',  'Materials Select',   ['LIN','APD','SHW','FCX','NEM','NUE','ALB','DD','ECL','VMC']),
 }
 
-_HIGHER_BETTER = {'ROE', 'RevGrowth'}
+_HIGHER_BETTER = {'ROE', 'RevGrowth', 'GrossM', 'OpM', 'NetM', 'FCFMargin', 'FCFYield', 'EpsGrowth', 'CurrRatio'}
 
 
 def _get_sector_etf(sector, industry):
@@ -70,6 +70,10 @@ def _peer_avgs(peers, exclude):
         return round(sum(v) / len(v), 2) if v else None
 
     roes, pers, psrs, pbrs, revgs, des = [], [], [], [], [], []
+    gross_ms, op_ms, net_ms, ev_ebitdas = [], [], [], []
+    betas, curr_ratios, eps_growths = [], [], []
+    fcf_yields, fcf_margins = [], []
+
     for info in infos.values():
         roes.append(_safe(info, 'returnOnEquity', mult=100))
         pers.append(_safe(info, 'trailingPE'))
@@ -78,10 +82,25 @@ def _peer_avgs(peers, exclude):
         revgs.append(_safe(info, 'revenueGrowth', mult=100))
         raw_de = _safe(info, 'debtToEquity')
         des.append(round(raw_de / 100, 2) if raw_de is not None else None)
+        gross_ms.append(_safe(info, 'grossMargins',     mult=100))
+        op_ms.append(_safe(info, 'operatingMargins',    mult=100))
+        net_ms.append(_safe(info, 'profitMargins',      mult=100))
+        ev_ebitdas.append(_safe(info, 'enterpriseToEbitda'))
+        betas.append(_safe(info, 'beta'))
+        curr_ratios.append(_safe(info, 'currentRatio'))
+        eps_growths.append(_safe(info, 'earningsGrowth', mult=100))
+        fcf  = info.get('freeCashflow')
+        mcap = info.get('marketCap')
+        rev  = info.get('totalRevenue')
+        fcf_yields.append(round(fcf / mcap * 100, 2) if (fcf and mcap and mcap > 0) else None)
+        fcf_margins.append(round(fcf / rev  * 100, 2) if (fcf and rev  and rev  > 0) else None)
 
     return {
         'ROE': avg(roes), 'PER': avg(pers), 'PSR': avg(psrs),
         'PBR': avg(pbrs), 'RevGrowth': avg(revgs), 'DE': avg(des),
+        'GrossM': avg(gross_ms), 'OpM': avg(op_ms), 'NetM': avg(net_ms),
+        'EV_EBITDA': avg(ev_ebitdas), 'Beta': avg(betas), 'CurrRatio': avg(curr_ratios),
+        'FCFYield': avg(fcf_yields), 'FCFMargin': avg(fcf_margins), 'EpsGrowth': avg(eps_growths),
     }
 
 
@@ -146,6 +165,46 @@ def _grade(val, metric):
         if val <= 2.0: return '#f39c12', f'보통 ({val} / 1~2)', False
         return             '#e74c3c', f'위험 ({val} > 2.0)', True
 
+    if metric == 'EV_EBITDA':
+        if val <= 0:   return '#c0392b', '적자/비정상', True
+        if val <= 12:  return '#27ae60', f'저평가 ({val} ≤ 12)', False
+        if val <= 20:  return '#f39c12', f'보통 ({val} / 12~20)', False
+        return             '#e74c3c', f'고평가 ({val} > 20)', True
+
+    if metric == 'GrossM':
+        if val >= 50:  return '#27ae60', f'우수 ({val}% ≥ 50%)', False
+        if val >= 30:  return '#f39c12', f'보통 ({val}% / 30~50%)', False
+        if val >= 0:   return '#e74c3c', f'낮음 ({val}% < 30%)', True
+        return             '#c0392b', f'마이너스 ({val}%)', True
+
+    if metric in ('OpM', 'NetM', 'FCFMargin'):
+        if val >= 20:  return '#27ae60', f'우수 ({val}% ≥ 20%)', False
+        if val >= 10:  return '#f39c12', f'보통 ({val}% / 10~20%)', False
+        if val >= 0:   return '#e74c3c', f'낮음 ({val}% < 10%)', True
+        return             '#c0392b', f'적자 ({val}%)', True
+
+    if metric == 'FCFYield':
+        if val >= 5:   return '#27ae60', f'매력적 ({val}% ≥ 5%)', False
+        if val >= 2:   return '#f39c12', f'보통 ({val}% / 2~5%)', False
+        if val >= 0:   return '#e74c3c', f'낮음 ({val}% < 2%)', True
+        return             '#c0392b', f'현금소진 ({val}%)', True
+
+    if metric == 'Beta':
+        if val <= 0.8: return '#27ae60', f'방어적 ({val} ≤ 0.8)', False
+        if val <= 1.2: return '#f39c12', f'시장수준 ({val} / 0.8~1.2)', False
+        return             '#e67e22', f'공격적 ({val} > 1.2)', False
+
+    if metric == 'CurrRatio':
+        if val >= 2:   return '#27ae60', f'우수 ({val} ≥ 2.0)', False
+        if val >= 1:   return '#f39c12', f'보통 ({val} / 1~2)', False
+        return             '#e74c3c', f'위험 ({val} < 1.0)', True
+
+    if metric == 'EpsGrowth':
+        if val >= 20:  return '#27ae60', f'고성장 ({val}% ≥ 20%)', False
+        if val >= 5:   return '#f39c12', f'보통 ({val}% / 5~20%)', False
+        if val >= 0:   return '#e74c3c', f'저성장 ({val}% < 5%)', True
+        return             '#c0392b', f'역성장 ({val}%)', True
+
     return '#95a5a6', str(val), False
 
 
@@ -156,17 +215,43 @@ def analyze_financials(ticker, info):
     per        = _safe(info, 'trailingPE')
     psr        = _safe(info, 'priceToSalesTrailing12Months')
     pbr        = _safe(info, 'priceToBook')
-    rev_growth = _safe(info, 'revenueGrowth', mult=100)
+    ev_ebitda  = _safe(info, 'enterpriseToEbitda')
+    rev_growth = _safe(info, 'revenueGrowth',  mult=100)
+    eps_growth = _safe(info, 'earningsGrowth', mult=100)
+    gross_m    = _safe(info, 'grossMargins',    mult=100)
+    op_m       = _safe(info, 'operatingMargins',mult=100)
+    net_m      = _safe(info, 'profitMargins',   mult=100)
+    beta       = _safe(info, 'beta')
+    curr_ratio = _safe(info, 'currentRatio')
     raw_de     = _safe(info, 'debtToEquity')
     de         = round(raw_de / 100, 2) if raw_de is not None else None
+    fcf        = info.get('freeCashflow')
+    mcap_v     = info.get('marketCap')
+    rev_v      = info.get('totalRevenue')
+    fcf_yield  = round(fcf / mcap_v * 100, 2) if (fcf and mcap_v and mcap_v > 0) else None
+    fcf_margin = round(fcf / rev_v  * 100, 2) if (fcf and rev_v  and rev_v  > 0) else None
 
+    # (label, key, val, desc)  |  key='__H__' → 섹션 헤더, val=bg색, desc=제목
     metrics = [
-        ('ROE (%)',           'ROE',       roe,        '자기자본이익률 — 높을수록 수익성 우수'),
+        ('__H__', '__H__', '#2c3e50',  '📊 밸류에이션'),
         ('PER',               'PER',       per,        '주가수익비율 — 낮을수록 저평가'),
         ('PSR',               'PSR',       psr,        '주가매출비율 — 낮을수록 저평가'),
         ('PBR',               'PBR',       pbr,        '주가순자산비율 — 낮을수록 저평가'),
-        ('매출 성장률 YoY (%)', 'RevGrowth', rev_growth, '전년 대비 매출 성장률'),
-        ('부채비율 D/E',        'DE',        de,         '부채÷자본 — 낮을수록 재무 안전'),
+        ('EV / EBITDA',       'EV_EBITDA', ev_ebitda,  '부채 포함 기업가치 ÷ EBITDA — 자본구조 무관 밸류에이션'),
+        ('__H__', '__H__', '#27ae60',  '💰 수익성 & 현금창출'),
+        ('ROE (%)',            'ROE',       roe,        '자기자본이익률 — 높을수록 자본 효율 우수'),
+        ('매출총이익률 (%)',    'GrossM',    gross_m,    '가격경쟁력 지표 — 원가 통제력'),
+        ('영업이익률 (%)',      'OpM',       op_m,       '핵심 사업 수익성 — 비용 통제력'),
+        ('순이익률 (%)',        'NetM',      net_m,      '최종 이익률 — 회계 조정 후 실질 수익'),
+        ('FCF 마진 (%)',        'FCFMargin', fcf_margin, '잉여현금흐름 ÷ 매출 — 진짜 현금창출력'),
+        ('FCF 수익률 (%)',      'FCFYield',  fcf_yield,  'FCF ÷ 시가총액 — 5%↑ 채권 대비 매력적'),
+        ('__H__', '__H__', '#3498db',  '🚀 성장성'),
+        ('매출 성장률 YoY (%)', 'RevGrowth', rev_growth, '전년 대비 매출 증가율 — 20%↑ 고성장주'),
+        ('EPS 성장률 YoY (%)',  'EpsGrowth', eps_growth, '전년 대비 주당순이익 증가율'),
+        ('__H__', '__H__', '#e67e22',  '🛡️ 재무 안정성 & 리스크'),
+        ('부채비율 D/E',        'DE',        de,         '부채÷자본 — 낮을수록 안전 (고금리 환경 특히 중요)'),
+        ('베타 (β)',            'Beta',      beta,       '시장 대비 변동성 — 1.0=시장동행 / 1.5↑=고변동'),
+        ('유동비율',            'CurrRatio', curr_ratio, '유동자산÷유동부채 — 1.0 미만 시 단기 유동성 위험'),
     ]
 
     # ── 섹터 ETF 피어 평균 로딩 ───────────────────────────────
@@ -181,22 +266,34 @@ def analyze_financials(ticker, info):
         etf_avgs = _peer_avgs(peers, ticker)
         print(f'  ✅ [{etf_ticker}] 피어 평균 로딩 완료')
 
-    missing = sum(1 for _, _, v, _ in metrics if v is None)
-    avail   = 6 - missing
+    real_metrics = [(l, k, v, d) for l, k, v, d in metrics if k != '__H__']
+    avail = sum(1 for _, _, v, _ in real_metrics if v is not None)
+    total = len(real_metrics)
+    ratio = avail / total if total else 0
 
-    if avail >= 5:
-        rc, rl = '#27ae60', f'🟢 데이터 안전 — {avail}/6 지표 정상, 신뢰도 높음'
-    elif avail >= 3:
-        rc, rl = '#f39c12', f'🟡 데이터 주의 — {avail}/6 지표 정상, {missing}개 N/A'
+    if ratio >= 0.75:
+        rc, rl = '#27ae60', f'🟢 데이터 충분 — {avail}/{total} 지표 정상, 신뢰도 높음'
+    elif ratio >= 0.50:
+        rc, rl = '#f39c12', f'🟡 데이터 주의 — {avail}/{total} 지표 정상, 일부 N/A'
     else:
-        rc, rl = '#e74c3c', f'🔴 데이터 위험 — {avail}/6 지표만 확인됨, 투자 판단 주의 필요'
+        rc, rl = '#e74c3c', f'🔴 데이터 부족 — {avail}/{total}만 확인됨, 투자 판단 주의'
+
+    has_peer = etf_avgs is not None
+    colspan  = 5 if has_peer else 4
 
     rows = ''
     for label, key, val, desc in metrics:
+        # 섹션 헤더 행
+        if key == '__H__':
+            rows += (f'<tr style="background:{val}">'
+                     f'<td colspan="{colspan}" style="padding:7px 12px;color:white;'
+                     f'font-weight:bold;font-size:12px;letter-spacing:0.5px">{desc}</td></tr>')
+            continue
+
         color, status, _ = _grade(val, key)
         val_str = 'N/A' if val is None else str(val)
 
-        if etf_avgs is not None:
+        if has_peer:
             avg_val = etf_avgs.get(key)
             avg_str = 'N/A' if avg_val is None else str(avg_val)
             cmp_label, cmp_color = _compare(val, avg_val, key)
@@ -213,7 +310,8 @@ def analyze_financials(ticker, info):
             <td style="padding:9px 12px;font-weight:bold;color:#2c3e50">{label}</td>
             <td style="padding:9px 12px;text-align:center;font-size:14px;font-weight:bold">{val_str}</td>
             <td style="padding:6px 10px;text-align:center">
-                <span style="background:{color};color:white;border-radius:5px;padding:3px 10px;font-size:12px;font-weight:bold">{status}</span>
+                <span style="background:{color};color:white;border-radius:5px;padding:3px 10px;
+                             font-size:12px;font-weight:bold">{status}</span>
             </td>{etf_cell}
             <td style="padding:9px 12px;font-size:11px;color:#7f8c8d">{desc}</td>
         </tr>'''
