@@ -6,7 +6,10 @@
       "Bash(git -C \"c:\\\\Users\\\\chaeh\\\\Desktop\\\\stock\" push)",
       "Bash(git -C \"c:\\\\Users\\\\chaeh\\\\Desktop\\\\stock\" add step1_financials.py step2_charts.py step3_news.py quant_run.py)",
       "Bash(git -C \"c:\\\\Users\\\\chaeh\\\\Desktop\\\\stock\" commit -m \"퀀트 분석 고도화: FCF/마진/베타/EV·EBITDA/볼린저밴드/내부자거래/모멘텀 추가\")",
-      "Bash(python -c \"import json; nb=json.load\\(open\\('c:/Users/chaeh/Desktop/stock/main.ipynb'\\)\\); [print\\(f'--- Cell {i} ---\\\\n'+\\(''.join\\(c['source']\\)\\)\\) for i,c in enumerate\\(nb['cells']\\) if c['cell_type']=='code']\")"
+      "Bash(python -c \"import json; nb=json.load\\(open\\('c:/Users/chaeh/Desktop/stock/main.ipynb'\\)\\); [print\\(f'--- Cell {i} ---\\\\n'+\\(''.join\\(c['source']\\)\\)\\) for i,c in enumerate\\(nb['cells']\\) if c['cell_type']=='code']\")",
+      "Bash(python -c \"import portfolio_plan; print\\('문법 OK'\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(findstr /C:\"배당\" /C:\"최종 익절\" /C:\"시나리오\" /C:\"판정\" /C:\"손절 도달\")"
     ]
   }
 }
