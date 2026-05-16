@@ -40,6 +40,44 @@ _SECTOR_ETF = {
 
 _HIGHER_BETTER = {'ROE', 'RevGrowth', 'GrossM', 'OpM', 'NetM', 'FCFMargin', 'FCFYield', 'EpsGrowth', 'CurrRatio'}
 
+# ── 섹터/산업별 밸류에이션 임계값 ─────────────────────────────────────────────
+# PER/PSR/PBR: (good, ok) — ≤good=우수, ≤ok=보통, else=고평가
+# ROE:         (good, ok) — ≥good=우수, ≥ok=보통, else=저조
+# None → 해당 지표 비교 부적합 (예: 바이오 PER)
+_SECTOR_THRESHOLDS: dict = {
+    '__default__':            {'PER': (20,  30), 'PSR': (3,  5),  'PBR': (1.5, 3.0), 'ROE': (15, 10)},
+    'Technology':             {'PER': (30,  50), 'PSR': (5, 10),  'PBR': (4,  10)},
+    'Communication Services': {'PER': (25,  40), 'PSR': (4,  8),  'PBR': (3,   7)},
+    'Healthcare':             {'PER': (25,  40), 'PSR': (3,  6),  'PBR': (3,   6)},
+    'Financial Services':     {'PER': (15,  20), 'PSR': (2,  4),  'PBR': (1.2, 2.0), 'ROE': (12, 8)},
+    'Energy':                 {'PER': (15,  20), 'PSR': (1,  2),  'PBR': (1.5, 2.5)},
+    'Consumer Defensive':     {'PER': (22,  30), 'PSR': (1,  2),  'PBR': (3,   5)},
+    'Utilities':              {'PER': (18,  25), 'PSR': (2,  3),  'PBR': (1.5, 2.5), 'ROE': (10, 6)},
+    'Basic Materials':        {'PER': (15,  22), 'PSR': (1,  2),  'PBR': (1.5, 2.5)},
+    'Industrials':            {'PER': (20,  30), 'PSR': (2,  4),  'PBR': (2,   4)},
+    'Consumer Cyclical':      {'PER': (22,  35), 'PSR': (2,  4),  'PBR': (2,   5)},
+    'Real Estate':            {'PER': (25,  40), 'PSR': (4,  8),  'PBR': (1.5, 3.0), 'ROE': (8, 4)},
+}
+_INDUSTRY_THRESHOLDS: dict = {
+    'Biotechnology':                  {'PER': None,     'PSR': (6, 12), 'ROE': (0, -20)},
+    'Drug Manufacturers—General':     {'PER': (22, 35)},
+    'Software—Application':           {'PER': (35, 60), 'PSR': (6, 12), 'PBR': (5, 12)},
+    'Software—Infrastructure':        {'PER': (35, 60), 'PSR': (6, 12), 'PBR': (5, 12)},
+    'Internet Content & Information': {'PER': (30, 55), 'PSR': (5, 10), 'PBR': (4, 10)},
+    'Semiconductors':                 {'PER': (25, 40), 'PSR': (4,  8)},
+}
+
+
+def _get_thresh(metric, sector='', industry=''):
+    """섹터/산업별 임계값 반환. None = 해당 지표 비교 부적합."""
+    ind = _INDUSTRY_THRESHOLDS.get(industry or '', {})
+    if metric in ind:
+        return ind[metric]
+    sec = _SECTOR_THRESHOLDS.get(sector or '', {})
+    if metric in sec:
+        return sec[metric]
+    return _SECTOR_THRESHOLDS['__default__'].get(metric)
+
 
 def _get_sector_etf(sector, industry):
     if industry and industry in _INDUSTRY_ETF:
@@ -51,19 +89,26 @@ def _get_sector_etf(sector, industry):
 
 def _fetch_one(t):
     try:
-        return t, yf.Ticker(t).info
+        info = yf.Ticker(t).info
+        return t, info if info else None
     except Exception:
-        return t, {}
+        return t, None
 
 
 def _peer_avgs(peers, exclude):
     targets = [t for t in peers if t.upper() != exclude.upper()]
     infos = {}
+    failed = []
     with ThreadPoolExecutor(max_workers=8) as ex:
         futures = {ex.submit(_fetch_one, t): t for t in targets}
         for f in as_completed(futures):
             t, info = f.result()
-            infos[t] = info
+            if info is not None:
+                infos[t] = info
+            else:
+                failed.append(t)
+    if failed:
+        print(f'  ⚠️  피어 데이터 누락 ({len(failed)}/{len(targets)}개): {", ".join(failed)}')
 
     def avg(vals):
         v = [x for x in vals if x is not None]
@@ -128,31 +173,38 @@ def _safe(info, key, mult=1, dec=2):
     return round(float(v) * mult, dec)
 
 
-def _grade(val, metric):
+def _grade(val, metric, sector='', industry=''):
     if val is None:
         return '#95a5a6', 'N/A', True
 
     if metric == 'ROE':
-        if val >= 15:  return '#27ae60', f'우수 ({val}% ≥ 15%)', False
-        if val >= 10:  return '#f39c12', f'보통 ({val}% / 10~15%)', False
-        if val >= 0:   return '#e74c3c', f'위험 ({val}% < 10%)', True
-        return             '#c0392b', f'위험 (음수 {val}%)', True
+        g, ok = _get_thresh('ROE', sector, industry)
+        if val >= g:  return '#27ae60', f'우수 ({val}% ≥ {g}%)', False
+        if val >= ok: return '#f39c12', f'보통 ({val}% / {ok}~{g}%)', False
+        if val >= 0:  return '#e74c3c', f'위험 ({val}% < {ok}%)', True
+        return            '#c0392b', f'위험 (음수 {val}%)', True
 
     if metric == 'PER':
-        if val <= 0:   return '#c0392b', f'위험 (음수/비정상)', True
-        if val <= 20:  return '#27ae60', f'저평가 ({val} ≤ 20)', False
-        if val <= 30:  return '#f39c12', f'보통 ({val} / 20~30)', False
-        return             '#e74c3c', f'고평가 ({val} > 30)', True
+        thresh = _get_thresh('PER', sector, industry)
+        if thresh is None:
+            return '#95a5a6', f'해당없음 ({val}) — 성장주 PER 비교 부적합', False
+        g, ok = thresh
+        if val <= 0:  return '#c0392b', f'위험 (음수/비정상)', True
+        if val <= g:  return '#27ae60', f'저평가 ({val} ≤ {g})', False
+        if val <= ok: return '#f39c12', f'보통 ({val} / {g}~{ok})', False
+        return            '#e74c3c', f'고평가 ({val} > {ok})', True
 
     if metric == 'PSR':
-        if val <= 3:   return '#27ae60', f'저평가 ({val} ≤ 3)', False
-        if val <= 5:   return '#f39c12', f'보통 ({val} / 3~5)', False
-        return             '#e74c3c', f'고평가 ({val} > 5)', True
+        g, ok = _get_thresh('PSR', sector, industry)
+        if val <= g:  return '#27ae60', f'저평가 ({val} ≤ {g})', False
+        if val <= ok: return '#f39c12', f'보통 ({val} / {g}~{ok})', False
+        return            '#e74c3c', f'고평가 ({val} > {ok})', True
 
     if metric == 'PBR':
-        if val <= 1.5: return '#27ae60', f'저평가 ({val} ≤ 1.5)', False
-        if val <= 3:   return '#f39c12', f'보통 ({val} / 1.5~3)', False
-        return             '#e74c3c', f'고평가 ({val} > 3)', True
+        g, ok = _get_thresh('PBR', sector, industry)
+        if val <= g:  return '#27ae60', f'저평가 ({val} ≤ {g})', False
+        if val <= ok: return '#f39c12', f'보통 ({val} / {g}~{ok})', False
+        return            '#e74c3c', f'고평가 ({val} > {ok})', True
 
     if metric == 'RevGrowth':
         if val >= 20:  return '#27ae60', f'고성장 ({val}% ≥ 20%)', False
@@ -290,7 +342,7 @@ def analyze_financials(ticker, info):
                      f'font-weight:bold;font-size:12px;letter-spacing:0.5px">{desc}</td></tr>')
             continue
 
-        color, status, _ = _grade(val, key)
+        color, status, _ = _grade(val, key, sector, industry)
         val_str = 'N/A' if val is None else str(val)
 
         if has_peer:

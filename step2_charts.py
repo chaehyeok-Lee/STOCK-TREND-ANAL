@@ -3,7 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings('ignore', category=UserWarning)   # 한글 폰트 등 matplotlib UserWarning
+warnings.filterwarnings('ignore', category=FutureWarning)  # pandas FutureWarning
 
 from IPython.display import display, HTML
 

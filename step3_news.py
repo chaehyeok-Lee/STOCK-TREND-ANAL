@@ -5,7 +5,8 @@ from IPython.display import display, HTML
 
 
 # ── 상수 ─────────────────────────────────────────────────────
-FED_RATE_RANGE = '4.25% ~ 4.50%'  # 최신 FOMC 결정 기준금리 (변경 시 업데이트)
+FED_RATE_RANGE = '4.25% ~ 4.50%'  # FOMC 결정 기준금리 (변경 시 FED_RATE_DATE도 함께 업데이트)
+FED_RATE_DATE  = '2025-01-29'      # 위 상수의 기준일 — FRED 조회 실패 시 대체값으로 사용
 _RATE_CACHE: dict = {}             # 세션 내 금리 캐시 (1시간 유지)
 
 
@@ -378,10 +379,17 @@ def _macro_block(upcoming):
         '고용':       '#3498db',
     }
     if not upcoming:
-        return '''
+        last_cal = max(pd.Timestamp(r[0]) for r in MACRO_CALENDAR)
+        if last_cal < pd.Timestamp.now().normalize():
+            msg   = f'캘린더 만료 ({last_cal.strftime("%Y-%m-%d")} 이후 데이터 없음) — MACRO_CALENDAR 업데이트 필요'
+            p_col = '#e74c3c'
+        else:
+            msg   = '향후 60일 이내 주요 일정 없음'
+            p_col = '#95a5a6'
+        return f'''
         <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
           <h3 style="margin:0 0 6px;font-size:14px;color:#2c3e50">🌍 향후 60일 거시경제 일정</h3>
-          <p style="margin:0;font-size:12px;color:#95a5a6">향후 60일 이내 주요 일정 없음</p>
+          <p style="margin:0;font-size:12px;color:{p_col}">{msg}</p>
         </div>'''
 
     rows = ''
@@ -422,6 +430,29 @@ def _macro_block(upcoming):
     </div>'''
 
 
+def _fetch_fed_rate_live():
+    """FRED에서 Fed funds target rate 실시간 조회. (rate_str, date_str, success) 반환."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            'https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFEDTARU',
+            headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            lines = r.read().decode('utf-8').strip().split('\n')
+        for line in reversed(lines):
+            parts = line.strip().split(',')
+            if len(parts) == 2:
+                try:
+                    hi = float(parts[1])
+                    lo = round(hi - 0.25, 2)
+                    return f'{lo:.2f}% ~ {hi:.2f}%', parts[0], True
+                except ValueError:
+                    continue
+    except Exception:
+        pass
+    return None, None, False
+
+
 def _global_rates_block():
     """Fed금리·10Y국채·VIX·달러 실시간 표시 (세션 내 1시간 캐시)"""
     global _RATE_CACHE
@@ -436,6 +467,26 @@ def _global_rates_block():
             live[label] = round(float(h.iloc[-1]), 2) if not h.empty else None
         except Exception:
             live[label] = None
+
+    # ── Fed 기준금리: FRED 실시간 조회 → 실패 시 하드코딩 + 신선도 경고 ──────
+    fed_str, fed_date, fed_live = _fetch_fed_rate_live()
+    if fed_live:
+        fed_display = fed_str
+        fed_note    = f'FRED 실시간 ({fed_date})'
+        fed_col     = '#27ae60'
+    else:
+        fed_display = FED_RATE_RANGE
+        try:
+            days_old = (now - pd.Timestamp(FED_RATE_DATE)).days
+            if days_old > 90:
+                fed_note = f'⚠️ 하드코딩 ({FED_RATE_DATE} 기준, {days_old}일 경과 — 코드 업데이트 권장)'
+                fed_col  = '#e74c3c'
+            else:
+                fed_note = f'하드코딩 ({FED_RATE_DATE} 기준)'
+                fed_col  = '#f39c12'
+        except Exception:
+            fed_note = '하드코딩 기준 (FED_RATE_DATE 확인 필요)'
+            fed_col  = '#f39c12'
 
     def _fmt(v, suffix=''):
         return f'{v}{suffix}' if v is not None else 'N/A'
@@ -453,8 +504,8 @@ def _global_rates_block():
     rows = f'''
     <tr>
       <td style="padding:7px 14px;font-size:13px;color:#555"><b>🏦 미 연준 기준금리</b></td>
-      <td style="padding:7px;font-size:14px;font-weight:bold;color:#e74c3c">{FED_RATE_RANGE}</td>
-      <td style="padding:7px 14px;font-size:12px;color:#7f8c8d">최신 FOMC 결정 기준 (코드 상수 FED_RATE_RANGE)</td>
+      <td style="padding:7px;font-size:14px;font-weight:bold;color:{fed_col}">{fed_display}</td>
+      <td style="padding:7px 14px;font-size:12px;color:#7f8c8d">{fed_note}</td>
     </tr>
     <tr style="background:#f8f9fa">
       <td style="padding:7px 14px;font-size:13px;color:#555"><b>📈 미국 10Y 국채금리</b></td>
