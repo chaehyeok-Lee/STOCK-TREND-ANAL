@@ -667,6 +667,60 @@ def _scenarios(info):
     return bulls[:2], bears[:2]
 
 
+def _news_block(news_items):
+    if not news_items:
+        return '''
+        <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
+          <h3 style="margin:0 0 6px;font-size:14px;color:#2c3e50">📰 최근 뉴스</h3>
+          <p style="margin:0;font-size:12px;color:#95a5a6">뉴스 데이터 없음</p>
+        </div>'''
+
+    items_html = ''
+    for i, item in enumerate(news_items, 1):
+        short = item['title'][:85] + '...' if len(item['title']) > 85 else item['title']
+        link_btn = (
+            f'<a href="{item["link"]}" target="_blank" '
+            f'style="display:inline-block;background:#2980b9;color:white;'
+            f'font-size:12px;padding:4px 14px;border-radius:4px;'
+            f'text-decoration:none;font-weight:bold">원문 보기 →</a>'
+            if item['link'] else
+            '<span style="font-size:12px;color:#95a5a6">링크 없음</span>'
+        )
+        items_html += f'''
+        <details style="margin-bottom:5px;border:1px solid #dde4e9;
+                        border-radius:6px;overflow:hidden">
+          <summary style="cursor:pointer;padding:10px 14px;background:#f8f9fa;
+                          list-style:none;outline:none;display:block">
+            <span style="font-size:12px;font-weight:bold;color:#3498db">#{i}</span>
+            &nbsp;
+            <span style="font-size:13px;color:#2c3e50">{short}</span>
+            <span style="float:right;font-size:11px;color:#95a5a6;white-space:nowrap;margin-left:8px">
+              {item["source"]} · {item["date"]}
+            </span>
+          </summary>
+          <div style="padding:12px 16px;background:#fff;border-top:1px solid #ecf0f1">
+            <p style="margin:0 0 8px;font-size:13px;color:#2c3e50;line-height:1.7">
+              {item["title"]}
+            </p>
+            <div style="font-size:12px;color:#7f8c8d;margin-bottom:10px">
+              출처: <b>{item["source"]}</b> &nbsp;|&nbsp; 날짜: <b>{item["date"]}</b>
+            </div>
+            {link_btn}
+          </div>
+        </details>'''
+
+    return f'''
+    <div style="margin-bottom:14px">
+      <h3 style="margin:0 0 8px;color:#2c3e50;font-size:14px">
+        📰 최근 뉴스 (최대 6개) — 클릭하면 펼쳐집니다
+      </h3>
+      {items_html}
+      <p style="font-size:11px;color:#95a5a6;margin-top:4px">
+        * 제목 클릭으로 펼치기 / 다시 클릭으로 접기
+      </p>
+    </div>'''
+
+
 # ══════════════════════════════════════════════════════════════
 # 메인 함수
 # ══════════════════════════════════════════════════════════════
@@ -687,21 +741,6 @@ def analyze_news(ticker, info, raw_news,
     upcoming         = _upcoming_macro(days_ahead=60)
     risks            = SECTOR_RISKS.get(sector, DEFAULT_RISKS)[:4]
     bulls, bears     = _scenarios(info)
-
-    # 뉴스 테이블
-    news_rows = ''
-    for item in news_items:
-        lo = (f'<a href="{item["link"]}" target="_blank" '
-              f'style="color:#2980b9;text-decoration:none">') if item['link'] else ''
-        lc = '</a>' if item['link'] else ''
-        news_rows += f'''
-        <tr style="border-bottom:1px solid #ecf0f1">
-          <td style="padding:7px 10px;font-size:12px">{lo}📰 {item["title"]}{lc}</td>
-          <td style="padding:7px 10px;font-size:11px;color:#7f8c8d;white-space:nowrap">{item["source"]}</td>
-          <td style="padding:7px 10px;font-size:11px;color:#7f8c8d;white-space:nowrap">{item["date"]}</td>
-        </tr>'''
-    if not news_rows:
-        news_rows = '<tr><td colspan="3" style="padding:10px;color:#95a5a6;text-align:center">뉴스 데이터 없음</td></tr>'
 
     bull_li = ''.join(f'<li style="margin:5px 0;font-size:13px">✅ {b}</li>' for b in bulls)
     bear_li = ''.join(f'<li style="margin:5px 0;font-size:13px">⚠️ {b}</li>' for b in bears)
@@ -724,22 +763,7 @@ def analyze_news(ticker, info, raw_news,
       {_global_rates_block()}
       {_macro_block(upcoming)}
       {_sector_risk_block(sector, risks)}
-
-      <div style="margin-bottom:14px">
-        <h3 style="margin:0 0 8px;color:#2c3e50;font-size:14px">📰 최근 뉴스 (최대 6개)</h3>
-        <table style="border-collapse:collapse;width:100%;background:#fff;
-                      border:1px solid #ecf0f1;border-radius:6px;overflow:hidden">
-          <thead>
-            <tr style="background:#2c3e50;color:white;font-size:12px">
-              <th style="padding:8px 10px;text-align:left">제목</th>
-              <th style="padding:8px 10px">출처</th>
-              <th style="padding:8px 10px">날짜</th>
-            </tr>
-          </thead>
-          <tbody>{news_rows}</tbody>
-        </table>
-        <p style="font-size:11px;color:#95a5a6;margin-top:4px">* 제목 클릭 시 원문 이동</p>
-      </div>
+      {_news_block(news_items)}
 
       <div style="display:flex;gap:12px;margin-bottom:14px">
         <div style="flex:1;background:#eafaf1;border-left:5px solid #27ae60;
