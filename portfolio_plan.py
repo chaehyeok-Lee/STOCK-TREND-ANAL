@@ -12,24 +12,32 @@ WATCHLIST = {
     '헬스케어': ['LLY', 'NVO', 'ABBV', 'UNH', 'ISRG', 'DXCM', 'MRNA', 'GILD', 'VRTX'],
 }
 
+# atr_mult=2.0 모든 기간 고정 (터틀 트레이더 표준)
+# tp_fallback_pct: 월가 목표가 없을 때 쓸 자체 익절 폭
+# entry_end_drop: 진입 하단 (현재가 대비 %)
+# rr_min: 최소 허용 R/R 비율 (EV 판단 기준)
+# regime_fit: 이 전략이 유효한 시장 국면
 HOLDING_PARAMS = {
     '1m': {
-        'label': '단기 스윙 (1개월)', 'atr_mult': 1.5, 'trail_mult': 1.0,
-        'tp_pcts': [0.08, 0.15], 'split_ratios': [0.50, 0.50],
-        'entry_drops': [0.0, -0.04], 'monitor': '매일 종가 확인',
-        'rebal_months': 1, 'note': '모멘텀 강할 때 단기 차익. 빠른 손절 필수.',
+        'label': '단기 스윙 (1개월)',
+        'atr_mult': 2.0, 'tp_fallback_pct': 0.10, 'entry_end_drop': -0.05,
+        'monitor': '매일 종가', 'rebal_months': 1, 'rr_min': 1.5,
+        'note': '모멘텀 강할 때 단기 차익. 실적 발표 전후 포지션 주의.',
+        'regime_fit': ('bullish', 'neutral'),
     },
     '3m': {
-        'label': '중기 포지션 (3개월)', 'atr_mult': 2.0, 'trail_mult': 1.5,
-        'tp_pcts': [0.10, 0.20], 'split_ratios': [0.33, 0.33, 0.34],
-        'entry_drops': [0.0, -0.05, -0.10], 'monitor': '주 1회 확인',
-        'rebal_months': 3, 'note': '분기 실적 사이클 활용. 분할 매수로 리스크 분산.',
+        'label': '중기 포지션 (3개월)',
+        'atr_mult': 2.0, 'tp_fallback_pct': 0.20, 'entry_end_drop': -0.08,
+        'monitor': '주 1회', 'rebal_months': 3, 'rr_min': 2.0,
+        'note': '분기 실적 사이클 활용. 분할 진입으로 리스크 분산.',
+        'regime_fit': ('bullish', 'neutral', 'bearish'),
     },
     '6m': {
-        'label': '장기 성장 (6개월)', 'atr_mult': 3.0, 'trail_mult': 2.0,
-        'tp_pcts': [0.20, 0.40], 'split_ratios': [0.25, 0.25, 0.25, 0.25],
-        'entry_drops': [0.0, -0.05, -0.10, -0.15], 'monitor': '월 1회 확인',
-        'rebal_months': 6, 'note': '성장 스토리 베팅. 단기 변동성 무시, 넓은 손절.',
+        'label': '장기 성장 (6개월)',
+        'atr_mult': 2.0, 'tp_fallback_pct': 0.35, 'entry_end_drop': -0.12,
+        'monitor': '월 1회', 'rebal_months': 6, 'rr_min': 2.5,
+        'note': '성장 스토리 베팅. 강세장 + 강한 모멘텀 구간에 적합.',
+        'regime_fit': ('bullish',),
     },
 }
 
@@ -173,11 +181,12 @@ def _get_earnings_info(stock):
 
 
 def _dynamic_kelly_wr(regime, vix_val):
+    # Faber(2007) + VIX overlay: 강세장 베이스 0.58, 약세장 0.48
     wr = 0.55
     if regime == 'bullish':
-        wr += 0.05
+        wr += 0.03
     elif regime == 'bearish':
-        wr -= 0.05
+        wr -= 0.07
     if vix_val is not None:
         if vix_val >= 30:
             wr -= 0.05
@@ -267,6 +276,131 @@ def _go_no_go(rsi_val, macd_bull, rr, regime, vix_val,
     return signals, score, verdict, emoji
 
 
+def _period_fit(period_key, regime, vix_val, rsi_val, mom_12, rr):
+    """보유기간별 적합도 점수 (0~100). 근거: Faber 2007 + J&T 1993 + VIX overlay."""
+    p = HOLDING_PARAMS[period_key]
+    score = 50  # baseline
+
+    # 1. 시장 국면 적합도 (Faber 2007: 200MA 기반 국면)
+    if regime in p['regime_fit']:
+        score += 20
+    else:
+        score -= 20
+
+    # 2. VIX 리스크 (단기일수록 VIX 민감)
+    if vix_val is not None:
+        if vix_val >= 30:
+            penalty = {'1m': -20, '3m': -10, '6m': -5}
+            score += penalty.get(period_key, -10)
+        elif vix_val >= 20:
+            penalty = {'1m': -8, '3m': -4, '6m': 0}
+            score += penalty.get(period_key, -4)
+        else:
+            bonus = {'1m': 10, '3m': 5, '6m': 0}
+            score += bonus.get(period_key, 5)
+
+    # 3. 모멘텀 (J&T 1993: 12-1개월 모멘텀. 장기 전략에 더 중요)
+    if mom_12 is not None:
+        if mom_12 > 20:
+            bonus = {'1m': 5, '3m': 10, '6m': 15}
+            score += bonus.get(period_key, 10)
+        elif mom_12 > 0:
+            bonus = {'1m': 3, '3m': 6, '6m': 8}
+            score += bonus.get(period_key, 6)
+        else:
+            bonus = {'1m': 0, '3m': -5, '6m': -15}
+            score += bonus.get(period_key, -5)
+
+    # 4. RSI (단기는 과매수 회피, 장기는 덜 민감)
+    if rsi_val is not None:
+        if rsi_val > 75:
+            penalty = {'1m': -15, '3m': -8, '6m': -3}
+            score += penalty.get(period_key, -8)
+        elif 45 <= rsi_val <= 65:
+            score += 5
+
+    # 5. R/R 비율 (최소 rr_min 미달 시 감점)
+    if rr is not None:
+        if rr >= p['rr_min']:
+            score += 10
+        elif rr >= 1.5:
+            score += 0
+        else:
+            score -= 15
+
+    return max(0, min(100, score))
+
+
+def _get_upcoming_events(info, raw_dividends, earnings_date, days_ahead=90):
+    """거시경제 + 실적 + 배당 이벤트를 날짜순으로 반환."""
+    try:
+        from step3_news import MACRO_CALENDAR
+    except ImportError:
+        MACRO_CALENDAR = []
+
+    now    = pd.Timestamp.now().normalize()
+    cutoff = now + pd.Timedelta(days=days_ahead)
+    events = []
+
+    # 거시경제 이벤트
+    for row in MACRO_CALENDAR:
+        dt = pd.Timestamp(row[0])
+        if now <= dt <= cutoff:
+            diff = (dt - now).days
+            events.append({
+                'date': dt, 'dday': diff,
+                'name': row[1], 'cat': row[3], 'icon': row[4],
+                'scope': '거시',
+            })
+
+    # EPS 실적 발표
+    if earnings_date is not None:
+        dt = pd.Timestamp(earnings_date).normalize()
+        if now <= dt <= cutoff:
+            diff = (dt - now).days
+            events.append({
+                'date': dt, 'dday': diff,
+                'name': '실적 발표 (EPS)', 'cat': '실적', 'icon': '📢',
+                'scope': '종목',
+            })
+
+    # 배당 ex-date
+    try:
+        ex_raw = info.get('exDividendDate')
+        if ex_raw:
+            ex_dt = pd.Timestamp(ex_raw, unit='s').normalize()
+            if now <= ex_dt <= cutoff:
+                diff = (ex_dt - now).days
+                events.append({
+                    'date': ex_dt, 'dday': diff,
+                    'name': '배당락일 (Ex-Div)', 'cat': '배당', 'icon': '💰',
+                    'scope': '종목',
+                })
+    except Exception:
+        pass
+
+    # 배당 지급 예상일 (최근 4회 간격 평균)
+    try:
+        if raw_dividends is not None and len(raw_dividends) >= 4:
+            dates = raw_dividends.index.sort_values()[-5:]
+            gaps  = [(dates[i] - dates[i - 1]).days for i in range(1, len(dates))]
+            avg_gap = int(sum(gaps) / len(gaps))
+            last_pay = pd.Timestamp(dates[-1]).normalize()
+            next_pay = last_pay + pd.Timedelta(days=avg_gap)
+            if now <= next_pay <= cutoff:
+                diff = (next_pay - now).days
+                events.append({
+                    'date': next_pay, 'dday': diff,
+                    'name': '배당 지급 예상', 'cat': '배당', 'icon': '💵',
+                    'scope': '종목',
+                })
+    except Exception:
+        pass
+
+    events.sort(key=lambda x: x['date'])
+    return events
+
+
 # ── 방법론 설명 ───────────────────────────────────────────────────────────────
 
 def show_methodology():
@@ -281,23 +415,34 @@ def show_methodology():
           "  → Man AHL, Winton Group 등 CTA 헤지펀드가 변형 사용",
           "원리  : 최근 변동폭(ATR) 배수를 손절 기준으로 삼아",
           "       시장 노이즈 안에서는 버티고 진짜 추세 전환 시 청산",
+          "★ 모든 기간 ATR×2.0 통일: 연구 결과 1.5~2.5 범위에서 2.0이",
+          "  샤프비율·최대손실비율 균형 기준 최적 (Kaufman, 2013)",
           "리스크: 횡보장에서 잦은 손절 → 수수료·슬리피지 누적"]),
-        ("2. 하프켈리 포지션 사이징 (Half-Kelly Criterion)",
+        ("2. 기대값(EV) 기반 리스크/보상",
+         ["실사례: 레이 달리오 All-Weather / 르네상스 테크",
+          "  → 단순 R/R이 아닌 확률가중 기대값으로 포지션 결정",
+          "원리  : EV = 승률×수익 − 패율×손실",
+          "       EV > 0 이고 R/R ≥ rr_min이어야 진입",
+          "       손실 비대칭 고려: -10% 손실 → +11.1% 회복 필요",
+          "★ 손절 임박 시 EV 급감 → 기계적 청산이 심리적 버티기보다 유리",
+          "리스크: 승률 추정 오류 시 과도 베팅 → 보수적 가정 권장"]),
+        ("3. 하프켈리 포지션 사이징 (Half-Kelly Criterion)",
          ["실사례: Ed Thorp (블랙잭 → 헤지펀드, 1960~2000년대)",
           "  → Kelly 공식으로 수십억 달러 운용, 230개월 무손실",
           "  → 르네상스 테크놀로지, DE Shaw 등 퀀트 펀드 적용",
           "원리  : 수학적 최적 베팅의 절반만 사용 → 파산 리스크 감소",
           "       f = (승률×수익 − 패율×손실) ÷ 수익",
-          "★ 개선: 고정 0.55 → 시장국면+VIX 기반 동적 계산",
-          "       강세+VIX안정 → 0.60 / 약세+VIX공포 → 0.45",
+          "★ 고정 승률 → 국면+VIX 기반 동적 계산",
+          "       강세+VIX안정 → 0.58 / 약세+VIX공포 → 0.43",
           "리스크: 승률 추정 오류 시 과도 베팅 → 보수적 가정 권장"]),
-        ("3. 분할매수 DCA (Dollar Cost Averaging)",
-         ["실사례: 워런 버핏의 점진적 포지션 구축 방식",
-          "  → 기관투자자 표준 (VWAP 기반 분할 체결)",
-          "  → S&P500 장기 DCA: 과거 20년 기준 연평균 약 10%",
-          "원리  : 진입 시점 분산 → 평균 단가 낮추기 + 타이밍 리스크 축소",
-          "★ 개선: SPY 대비 상대 수익률로 시장 하락 vs 종목 문제 구분",
-          "리스크: 하락 추세 지속 시 평균단가 상승 → 손실 확대 가능"]),
+        ("4. 모멘텀 팩터 (J&T 1993) + Faber 트렌드",
+         ["Jegadeesh & Titman(1993): 12-1개월 모멘텀 포트폴리오",
+          "  → 과거 수익 상위 종목이 향후 3~12개월 지속 아웃퍼폼",
+          "  → 연 평균 초과수익 +1%/월 (거래비용 전 기준)",
+          "Faber(2007): 200MA 기반 추세추종",
+          "  → SPY 200MA 위: 주식 보유 / 아래: 현금. S&P 장기 성과 개선",
+          "★ 두 팩터 결합: 모멘텀 강 + 200MA 위 = 최고 승률 조합",
+          "  Aronson(2006) Evidence-Based TA: 단일 신호보다 컨플루언스 중요"]),
     ]
 
     for title, lines in sections:
@@ -308,81 +453,11 @@ def show_methodology():
             print(f"  {line}")
 
     print(f"\n{DASH}")
-    print(f"  ※ 세 방법 조합 (이 툴의 접근법)")
+    print(f"  ※ 조합 (이 툴의 접근법)")
     print(DASH)
-    print(f"  ATR 손절 + 하프켈리 비중 + DCA 진입의 조합은")
+    print(f"  ATR×2 손절 + EV 기반 R/R + 하프켈리 비중 + 모멘텀+트렌드 진입의 조합은")
     print(f"  체계적 트레이더들이 실전에서 가장 많이 사용하는 리스크 관리 체계입니다.")
     print(f"  과거 성과가 미래를 보장하지 않으며 개인 판단이 최우선입니다.")
-    print(f"\n{SEP}\n")
-
-
-# ── 용어 사전 ─────────────────────────────────────────────────────────────────
-
-def show_glossary():
-    print(f"\n{SEP}")
-    print(f"  📖  투자 용어 사전  (복잡한 지표를 쉽게 이해하기)")
-    print(SEP)
-
-    terms = [
-        ("ATR (Average True Range) — 평균 진폭",
-         "최근 14일간 하루 평균 얼마나 오르내렸는지를 나타내는 숫자",
-         "ATR=$5 → 하루 평균 $5 움직임. 이 값의 2배를 손절 폭으로 씁니다"),
-        ("RSI (Relative Strength Index) — 상대 강도 지수",
-         "0~100 사이 숫자. 최근 얼마나 빠르게, 강하게 올랐는지 측정",
-         "70↑ = 과열(너무 빨리 올라 조정 가능) / 30↓ = 침체(반등 기대) / 40~60 = 정상"),
-        ("MACD — 이동평균 수렴·발산",
-         "12일 평균과 26일 평균의 차이. 단기 추세와 장기 추세를 비교",
-         "단기선이 장기선을 위로 돌파 = 상승 신호(골든크로스) / 아래로 = 하락(데드크로스)"),
-        ("200MA (200일 이동평균선)",
-         "최근 200거래일(약 10개월) 평균 주가. 장기 추세의 나침반",
-         "주가 > 200MA → 강세. SPY가 200MA 위 → 전체 시장 강세장으로 판단"),
-        ("VIX — 공포 지수",
-         "S&P500 옵션 시장이 예상하는 향후 30일 변동성. 투자자의 불안감 온도계",
-         "20↓ = 평온 / 20~30 = 주의 / 30↑ = 공포(급락 위험, 포지션 50% 자동 축소)"),
-        ("R/R (Risk/Reward Ratio) — 위험 대비 보상",
-         "얼마 잃을 수 있는가(위험) vs 얼마 벌 수 있는가(보상)의 비율",
-         "R/R=2:1 → 목표수익 +20% / 손절 -10%. '2번 틀려도 1번에 본전' 구조. 최소 1.5:1 권장"),
-        ("하프켈리 (Half-Kelly Criterion)",
-         "수학적으로 최적인 베팅 비율의 절반. 과도한 리스크를 막는 안전장치",
-         "100% 켈리는 수익은 크지만 변동폭도 큼. 절반만 쓰면 안정적 복리 성장"),
-        ("P/E (Price-to-Earnings) — 주가수익비율",
-         "현재 주가가 연간 이익의 몇 배인지. '이 회사 이익의 몇 년치를 지금 내가 사는가'",
-         "P/E=25 → 25년치 이익 지불. 낮을수록 저평가. 반드시 같은 섹터 평균과 비교"),
-        ("PEG (Price/Earnings-to-Growth) — 성장률 감안 P/E",
-         "P/E를 성장률로 나눈 값. 빠르게 성장하는 기업의 비싼 P/E를 정당화",
-         "PEG < 1 = 성장 대비 저평가 / PEG = 1 = 적정 / PEG > 2 = 고평가"),
-        ("FCF Yield (Free Cash Flow Yield) — 잉여현금흐름 수익률",
-         "회사가 실제로 벌어들이는 현금을 시가총액으로 나눈 비율. '진짜 수익률'",
-         "FCF Yield=5% → 시총 대비 5% 현금 창출. 높을수록 배당·자사주·투자 여력 큼"),
-        ("Beta — 시장 민감도",
-         "시장(SPY)이 1% 움직일 때 이 주식이 몇 % 움직이는지",
-         "Beta=1.5 → 시장+10%면 +15%, 시장-10%면 -15%. 1보다 크면 공격적, 작으면 방어적"),
-        ("D/E (Debt-to-Equity) — 부채비율",
-         "자본 대비 빚이 얼마나 많은지. 금리 인상 시 영향을 받는 정도",
-         "D/E=100% → 빚=자본. 200% 이상은 금리 민감. 기술주는 낮고 유틸리티는 높은 경향"),
-        ("공매도 비율 (Short % of Float)",
-         "유통 주식 중 하락에 베팅한(공매도) 비율. 시장의 부정적 견해 온도계",
-         "5% 미만=정상 / 10% 이상=위험(숏스퀴즈 or 펀더멘털 문제 신호)"),
-        ("VWAP (Volume Weighted Average Price)",
-         "거래량을 고려한 평균 가격. 기관투자자가 대량 매수/매도 시 기준으로 삼는 가격",
-         "VWAP 근처에서 분할 체결하면 시장 충격(슬리피지) 최소화 가능"),
-        ("슬리피지 (Slippage)",
-         "원하는 가격과 실제 체결된 가격의 차이. 대량 매수 시 가격이 밀려 발생",
-         "1000주를 $100에 사려 했는데 $100.5에 체결 → 슬리피지 $0.5/주"),
-        ("배당수익률 (Dividend Yield)",
-         "주가 대비 연간 배당금 비율. 주식을 보유하는 것만으로 받는 '이자' 같은 개념",
-         "주가 $100, 연 배당금 $3 → 배당수익률 3%. 성장주(NVDA)는 낮고 배당주(JNJ)는 높음"),
-        ("손실 회복 비대칭 (Recovery Asymmetry)",
-         "손실 후 원금 회복에 필요한 수익률이 항상 손실률보다 크다는 수학적 사실",
-         "−10% 손실 → +11.1% 필요 / −20% 손실 → +25% 필요 / −50% 손실 → +100% 필요"),
-    ]
-
-    for name, desc, example in terms:
-        print(f"\n{DASH}")
-        print(f"  ▶ {name}")
-        print(f"  {desc}")
-        print(f"  예시: {example}")
-
     print(f"\n{SEP}\n")
 
 
@@ -428,6 +503,14 @@ def analyze_portfolio(ticker, capital, holding='3m'):
 
     earnings_date, days_until_earnings = _get_earnings_info(stock)
 
+    # 배당 이력
+    try:
+        raw_dividends = stock.dividends
+        if raw_dividends.index.tz is not None:
+            raw_dividends.index = raw_dividends.index.tz_convert(None)
+    except Exception:
+        raw_dividends = None
+
     name      = info.get('longName') or info.get('shortName') or ticker
     sector    = info.get('sector', 'N/A')
     industry  = info.get('industry', 'N/A')
@@ -442,7 +525,6 @@ def analyze_portfolio(ticker, capital, holding='3m'):
     rec       = info.get('recommendationKey', '')
     short_pct = info.get('shortPercentOfFloat')
 
-    # 펀더멘털
     pe_trail  = info.get('trailingPE')
     pe_fwd    = info.get('forwardPE')
     peg       = info.get('trailingPegRatio') or info.get('pegRatio')
@@ -465,56 +547,61 @@ def analyze_portfolio(ticker, capital, holding='3m'):
     macd_bull     = _macd_signal(close)
     stock_ret_20d = (round((float(close.iloc[-1]) / float(close.iloc[-20]) - 1) * 100, 1)
                      if len(close) >= 20 else None)
+    # 12-1개월 모멘텀 (J&T 1993)
+    mom_12 = (round((float(close.iloc[-1]) / float(close.iloc[-252]) - 1) * 100, 1)
+              if len(close) >= 252 else
+              round((float(close.iloc[-1]) / float(close.iloc[0]) - 1) * 100, 1))
 
     pos52      = (round((price - l52) / (h52 - l52) * 100, 1)
                   if (h52 and l52 and h52 != l52) else None)
     upside_pct = round((target - price) / price * 100, 1) if target else None
 
-    atr_mult     = params['atr_mult']
-    trail_mult   = params['trail_mult']
-    tp_pcts      = params['tp_pcts']
-    split_ratios = params['split_ratios']
-    entry_drops  = params['entry_drops']
+    atr_mult = params['atr_mult']  # 항상 2.0
 
-    stop_loss  = round(price - atr_mult * atr_val, 2)  if atr_val else None
-    risk_pct   = round(atr_mult * atr_val / price * 100, 1) if atr_val else None
-    trail_stop = round(price - trail_mult * atr_val, 2) if atr_val else None
+    stop_loss = round(price - atr_mult * atr_val, 2) if atr_val else None
+    risk_pct  = round(atr_mult * atr_val / price * 100, 1) if atr_val else None
 
-    entries      = [round(price * (1 + d), 2) for d in entry_drops]
-    amounts      = [effective_capital * r for r in split_ratios]
-    shares_per   = [max(1, int(a // e)) for a, e in zip(amounts, entries)]
-    total_shares = sum(shares_per)
-    avg_cost     = (round(sum(s * e for s, e in zip(shares_per, entries)) / total_shares, 2)
-                    if total_shares else price)
-
-    tps          = [round(price * (1 + p), 2) for p in tp_pcts]
-    tp_auto_last = round(price * (1 + tp_pcts[-1] * 1.5), 2)
-    if target and round(target, 2) > tps[-1]:
-        tp_final = round(target, 2)
-        tp_label = '월가 컨센서스'
+    # 익절가: 월가 컨센서스 우선, 없으면 tp_fallback_pct
+    if target and upside_pct and upside_pct > 0:
+        tp_final  = round(target, 2)
+        tp_label  = f'월가 컨센서스 ({n_anal}명 평균)'
+        tp_upside = upside_pct
     else:
-        tp_final = tp_auto_last
-        tp_label = '자체 계산 (월가 목표가 낮음)'
-
-    sh_imm   = max(1, int(effective_capital // price))
-    cost_imm = round(sh_imm * price, 2)
-    ml_imm   = round(sh_imm * atr_mult * atr_val, 2) if atr_val else None
-    ml_split = round(total_shares * atr_mult * atr_val, 2) if atr_val else None
+        tp_final  = round(price * (1 + params['tp_fallback_pct']), 2)
+        tp_label  = f"자체 계산 ({int(params['tp_fallback_pct']*100)}% 목표)"
+        tp_upside = params['tp_fallback_pct'] * 100
 
     if upside_pct and risk_pct and risk_pct > 0:
-        rr       = round(upside_pct / risk_pct, 2)
+        rr       = round(tp_upside / risk_pct, 2)
         rr_label = '우수 ✅' if rr >= 2.0 else '보통 🟡' if rr >= 1.5 else '주의 🔴'
     else:
         rr = rr_label = None
 
-    w = _dynamic_kelly_wr(regime, vix_val)
-    if upside_pct and risk_pct and upside_pct > 0 and risk_pct > 0:
-        kelly_f = (w * (upside_pct / 100) - (1 - w) * (risk_pct / 100)) / (upside_pct / 100)
-        hk_f    = max(0.0, min(kelly_f / 2, 1.0))
-        hk_pct  = round(hk_f * 100, 1)
-        hk_amt  = round(effective_capital * hk_f, 0)
+    # EV 기반 승률 (Aronson 2006 컨플루언스 점수 기반)
+    # Go/No-Go 점수를 먼저 일부 계산해 승률 추정
+    _pre_score = 0
+    if rsi_val and 45 <= rsi_val <= 65: _pre_score += 1
+    if macd_bull: _pre_score += 1
+    if regime == 'bullish': _pre_score += 1
+    elif regime == 'bearish': _pre_score -= 1
+    if vix_val and vix_val < 20: _pre_score += 1
+    elif vix_val and vix_val >= 30: _pre_score -= 1
+
+    wp = (0.62 if _pre_score >= 4 else 0.58 if _pre_score >= 3 else
+          0.54 if _pre_score >= 2 else 0.51 if _pre_score >= 1 else
+          0.48 if _pre_score == 0 else 0.44 if _pre_score >= -1 else 0.40)
+
+    if risk_pct and tp_upside and risk_pct > 0 and tp_upside > 0:
+        ev           = round(wp * tp_upside - (1 - wp) * risk_pct, 1)
+        breakeven_wr = round(risk_pct / (risk_pct + tp_upside) * 100, 1)
+        kelly_f      = (wp * (tp_upside / 100) - (1 - wp) * (risk_pct / 100)) / (tp_upside / 100)
+        hk_f         = max(0.0, min(kelly_f / 2, 1.0))
+        hk_pct       = round(hk_f * 100, 1)
+        hk_amt       = round(effective_capital * hk_f, 0)
     else:
-        hk_pct = hk_amt = None
+        ev = breakeven_wr = hk_pct = hk_amt = None
+
+    w = _dynamic_kelly_wr(regime, vix_val)
 
     rebal = (pd.Timestamp.now() + pd.DateOffset(months=params['rebal_months'])).strftime('%Y-%m-%d')
 
@@ -529,21 +616,19 @@ def analyze_portfolio(ticker, capital, holding='3m'):
 
     # 시장 환경
     print(f"\n{DASH}")
-    print(f"  🌍 시장 환경  (전략 자동 반영)")
+    print(f"  🌍 시장 환경")
     print(f"{DASH}")
     if mkt['spy_price'] and mkt['ma200']:
         spy_vs_ma = round((mkt['spy_price'] / mkt['ma200'] - 1) * 100, 1)
         print(f"  SPY / 200MA  : ${mkt['spy_price']} / ${mkt['ma200']}  ({spy_vs_ma:+.1f}%)")
-        print(f"                 ※ 200MA=10개월 평균선. 위=강세, 아래=약세")
     print(f"  시장 국면    : {REGIME_KR[regime]}")
     if vix_val is not None:
         vix_lbl = ('공포구간 🔴 → 포지션 50% 자동 축소' if vix_val >= 30
                    else '주의구간 🟡' if vix_val >= 20 else '안정구간 🟢')
         print(f"  VIX (공포지수): {vix_val}  →  {vix_lbl}")
-        print(f"                 ※ 20↑주의, 30↑공포 (시장의 불안감 온도계)")
         if vix_val >= 30:
             print(f"  ⚠️  유효 투자금: ${effective_capital:,.0f}  (원래 ${capital:,.0f}의 50%)")
-    print(f"  하프켈리 승률: {w:.2f}  (국면+VIX 기반 동적 계산)")
+    print(f"  하프켈리 승률: {w:.2f}  (국면+VIX 동적 계산)")
 
     # 실적 발표 경고
     if earnings_date and days_until_earnings is not None and days_until_earnings >= 0:
@@ -561,16 +646,14 @@ def analyze_portfolio(ticker, capital, holding='3m'):
     if h52 and l52 and pos52 is not None:
         bar = _bar(pos52)
         print(f"  52주 범위    : ${l52:.2f} [{bar}] ${h52:.2f}")
-        pos52_lbl = ('고점권 ⚠️ 추가 상승 여력 제한' if pos52 > 75
-                     else '저점권 💡 반등 가능' if pos52 < 25 else '중간')
+        pos52_lbl = ('고점권 ⚠️' if pos52 > 75 else '저점권 💡' if pos52 < 25 else '중간')
         print(f"  52주 위치    : {pos52}%  →  {pos52_lbl}")
-    rsi_lbl = ('과매수 ⚠️ 단기 조정 가능' if rsi_val > 70
-               else '과매도 💡 반등 기대' if rsi_val < 30 else '중립 (정상)')
+    rsi_lbl = ('과매수 ⚠️' if rsi_val > 70 else '과매도 💡' if rsi_val < 30 else '중립')
     print(f"  RSI(14)      : {rsi_val}  →  {rsi_lbl}")
-    print(f"  ATR(14)      : ${atr_val}  ← 오늘 예상 변동폭, 손절 계산 기준")
+    print(f"  ATR(14)      : ${atr_val}  ← 손절 계산 기준")
     print(f"  연간 변동성  : {vol_val}%")
-    macd_lbl = ('상승 모멘텀 ▲ (단기 평균이 장기 평균 위)' if macd_bull
-                else '하락 모멘텀 ▼ (단기 평균이 장기 평균 아래)')
+    print(f"  12M 모멘텀   : {mom_12:+.1f}%  (J&T 1993 기준)")
+    macd_lbl = ('상승 모멘텀 ▲' if macd_bull else '하락 모멘텀 ▼')
     print(f"  MACD         : {macd_lbl}")
     if target:
         range_str = f"  범위 ${t_low:.2f}~${t_high:.2f}" if (t_low and t_high) else ""
@@ -578,107 +661,84 @@ def analyze_portfolio(ticker, capital, holding='3m'):
 
     # 펀더멘털 지표
     print(f"\n{DASH}")
-    print(f"  💹 펀더멘털 지표  (기업 가치 평가)")
+    print(f"  💹 펀더멘털 지표")
     print(f"{DASH}")
     has_fund = False
     if pe_trail is not None and pe_trail > 0:
-        print(f"  P/E (현재)   : {pe_trail:.1f}배  ← 현재 이익 기준. 낮을수록 저평가")
+        print(f"  P/E (현재)   : {pe_trail:.1f}배")
         has_fund = True
     if pe_fwd is not None and pe_fwd > 0:
-        print(f"  P/E (예상)   : {pe_fwd:.1f}배  ← 내년 이익 기준. 현재보다 낮으면 성장 기대")
+        print(f"  P/E (예상)   : {pe_fwd:.1f}배")
         has_fund = True
     if peg is not None and peg > 0:
         peg_lbl = '저평가 💡' if peg < 1.0 else '적정' if peg <= 1.5 else '주의 ⚠️'
-        print(f"  PEG 비율     : {peg:.2f}  →  {peg_lbl}  (1.0↓=성장 대비 저평가)")
+        print(f"  PEG 비율     : {peg:.2f}  →  {peg_lbl}")
         has_fund = True
     if beta is not None:
         beta_lbl = ('저변동 방어주' if beta < 0.8 else
                     '시장 동조' if beta <= 1.2 else '고변동 공격주')
         print(f"  Beta         : {beta:.2f}  →  {beta_lbl}")
-        print(f"                 ※ 시장+10%면 이 종목 {beta*10:+.1f}% / 시장-10%면 {-beta*10:+.1f}%")
         has_fund = True
     if de_ratio is not None:
-        de_lbl = ('부채 낮음 💡' if de_ratio < 50 else
-                  '적정' if de_ratio < 150 else '부채 높음 ⚠️')
-        print(f"  부채비율(D/E): {de_ratio:.0f}%  →  {de_lbl}  (자본 대비 빚)")
+        de_lbl = ('부채 낮음 💡' if de_ratio < 50 else '적정' if de_ratio < 150 else '부채 높음 ⚠️')
+        print(f"  부채비율(D/E): {de_ratio:.0f}%  →  {de_lbl}")
         has_fund = True
     if fcf_yield is not None:
         fy_lbl = '우수 💡' if fcf_yield > 5 else '양호' if fcf_yield > 2 else '낮음'
-        print(f"  FCF Yield    : {fcf_yield:.1f}%  →  {fy_lbl}  (실현 현금 수익률)")
+        print(f"  FCF Yield    : {fcf_yield:.1f}%  →  {fy_lbl}")
         has_fund = True
     if div_yield is not None and div_yield > 0:
-        print(f"  배당수익률   : {div_yield:.2f}%  ← 주가 대비 연간 배당금 비율")
+        print(f"  배당수익률   : {div_yield:.2f}%")
         has_fund = True
     if not has_fund:
         print(f"  (펀더멘털 데이터 없음 — ETF 또는 데이터 미제공)")
 
-    # 보유기간 비교
+    # 보유기간별 적합도 비교
     print(f"\n{DASH}")
-    print(f"  📅 보유기간별 비교  (선택: {params['label']})")
+    print(f"  📅 보유기간별 적합도  (선택: {params['label']})")
+    print(f"     근거: Faber(2007) 국면 + J&T(1993) 모멘텀 + VIX overlay")
     print(f"{DASH}")
-    if atr_val:
-        print(f"  {'구분':<14} {'단기(1개월)':>13} {'중기(3개월)':>13} {'장기(6개월)':>13}")
-        print(f"  {'─'*13} {'─'*13} {'─'*13} {'─'*13}")
-        stops  = {k: round(price - HOLDING_PARAMS[k]['atr_mult'] * atr_val, 2) for k in ['1m', '3m', '6m']}
-        tp1s   = {k: round(price * (1 + HOLDING_PARAMS[k]['tp_pcts'][0]), 2) for k in ['1m', '3m', '6m']}
-        tp2s   = {k: round(price * (1 + HOLDING_PARAMS[k]['tp_pcts'][1]), 2) for k in ['1m', '3m', '6m']}
-        splits = {'1m': '2회(50/50)', '3m': '3회(33/34)', '6m': '4회(25×4)'}
-        print(f"  {'손절가':<14} ${stops['1m']:>11.2f}  ${stops['3m']:>11.2f}  ${stops['6m']:>11.2f}")
-        print(f"  {'1차 익절':<14} ${tp1s['1m']:>11.2f}  ${tp1s['3m']:>11.2f}  ${tp1s['6m']:>11.2f}")
-        print(f"  {'2차 익절':<14} ${tp2s['1m']:>11.2f}  ${tp2s['3m']:>11.2f}  ${tp2s['6m']:>11.2f}")
-        print(f"  {'분할 방식':<14} {splits['1m']:>13} {splits['3m']:>13} {splits['6m']:>13}")
+    print(f"  {'구분':<18} {'단기(1개월)':>12} {'중기(3개월)':>12} {'장기(6개월)':>12}")
+    print(f"  {'─'*17} {'─'*12} {'─'*12} {'─'*12}")
 
-    # 리스크/보상
-    print(f"\n{DASH}")
-    print(f"  📊 리스크 / 보상 분석")
-    print(f"{DASH}")
-    if rr:
-        print(f"  R/R 비율     : {rr}:1  →  {rr_label}")
-        print(f"  기대 수익    : +{upside_pct}%  (월가 목표가 기준)")
-        print(f"  최대 손실    : −{risk_pct}%  (ATR×{atr_mult} 손절)")
-        print(f"                 ※ R/R≥2:1 → '2번 틀려도 1번에 본전' 구조")
-    if hk_pct is not None:
-        k_lbl = ('적정' if 0 < hk_pct <= 25 else
-                 '과도 — 축소 권장' if hk_pct > 25 else '매수 비추천 (기대값 음수)')
-        print(f"  동적 하프켈리: {hk_pct}%  (${hk_amt:,.0f})  →  {k_lbl}")
-        print(f"  ※ 승률 {w:.2f} 적용  (국면:{regime} VIX:{vix_val})")
+    fits = {k: _period_fit(k, regime, vix_val, rsi_val, mom_12, rr) for k in ['1m', '3m', '6m']}
+    fit_labels = {k: ('★ 최적' if fits[k] >= 70 else '양호' if fits[k] >= 55 else '주의 ⚠️')
+                  for k in fits}
+    stops  = {k: (round(price - HOLDING_PARAMS[k]['atr_mult'] * atr_val, 2) if atr_val else None)
+              for k in ['1m', '3m', '6m']}
+    tp_fbs = {k: round(price * (1 + HOLDING_PARAMS[k]['tp_fallback_pct']), 2) for k in ['1m', '3m', '6m']}
+    tp_fin = {k: (round(target, 2) if target and upside_pct and upside_pct > 0 else tp_fbs[k])
+              for k in ['1m', '3m', '6m']}
 
-    # 진입 전략 1
+    def _stop_str(k): return f"${stops[k]}" if stops[k] else 'N/A'
+    def _tp_str(k):   return f"${tp_fin[k]}"
+
+    print(f"  {'손절가 (ATR×2.0)':<18} {_stop_str('1m'):>12} {_stop_str('3m'):>12} {_stop_str('6m'):>12}")
+    print(f"  {'익절가 (목표가)':<18} {_tp_str('1m'):>12} {_tp_str('3m'):>12} {_tp_str('6m'):>12}")
+    print(f"  {'모니터링':<18} {'매일':>12} {'주 1회':>12} {'월 1회':>12}")
+    print(f"  {'적합도 점수':<18} {fits['1m']:>11}점 {fits['3m']:>11}점 {fits['6m']:>11}점")
+    print(f"  {'평가':<18} {fit_labels['1m']:>12} {fit_labels['3m']:>12} {fit_labels['6m']:>12}")
+
+    # 진입 범위 (분할 매수)
+    entry_start = price
+    entry_end   = round(price * (1 + params['entry_end_drop']), 2)
     print(f"\n{DASH}")
-    print(f"  📥 전략 1 — 즉시 전액 매수")
-    if vix_size_mult < 1.0:
-        print(f"  ⚠️  VIX≥30: 유효 투자금 ${effective_capital:,.0f}")
+    print(f"  📥 분할 매수 진입 범위")
     print(f"{DASH}")
-    print(f"  매수가    : ${entries[0]}  →  {sh_imm}주  (실투자금 ${cost_imm:,.2f})")
+    print(f"  진입 시작    : ${entry_start}  (현재가 즉시 진입 기준)")
+    print(f"  진입 하단    : ${entry_end}  ({int(abs(params['entry_end_drop']*100))}% 하락 시 추가 매수 하단)")
+    print(f"  ※ 분할 횟수와 비율은 투자자 판단 — 추천: 현재가에서 시작해 하락 시 점진 추가")
     if stop_loss:
-        print(f"  손절가    : ${stop_loss}  (−{risk_pct}%,  ATR×{atr_mult})")
-    if ml_imm:
-        print(f"  최대손실  : −${ml_imm:,.2f}  (−{round(ml_imm / effective_capital * 100, 1)}%)")
-    print(f"  적합 상황 : 상승 모멘텀 강하고 즉시 진입 확신 있을 때")
-
-    # 진입 전략 2
-    print(f"\n{DASH}")
-    print(f"  📥 전략 2 — {len(entries)}회 분할매수  (권장)")
-    if vix_size_mult < 1.0:
-        print(f"  ⚠️  VIX≥30: 유효 투자금 ${effective_capital:,.0f}")
-    print(f"{DASH}")
-    labels = ['즉시' if d == 0.0 else f'−{abs(int(round(d * 100)))}% 하락' for d in entry_drops]
-    for i, (e, sh, amt, ratio) in enumerate(zip(entries, shares_per, amounts, split_ratios)):
-        print(f"  {i+1}차 ({labels[i]}, {int(ratio*100)}%)  : ${e}  →  {sh}주  (${amt:,.0f})")
-    print(f"  ─ 평균단가: ${avg_cost}  |  총 {total_shares}주")
-    if stop_loss:
-        print(f"  ─ 손절가 : ${stop_loss}  (ATR×{atr_mult})")
-    if ml_split:
-        print(f"  ─ 최대손실: −${ml_split:,.2f}  (−{round(ml_split / effective_capital * 100, 1)}%)")
-    print(f"  적합 상황 : 변동성 높거나 확신 부족할 때")
+        print(f"  손절가 (고정): ${stop_loss}  (ATR×2.0, 종가 기준 이탈 시 청산)")
+    print(f"  익절가 목표  : ${tp_final}  ({tp_label})")
 
     # SPY 상대 수익률
     if stock_ret_20d is not None and spy_ret_20d is not None:
         rel = round(stock_ret_20d - spy_ret_20d, 1)
-        print(f"\n  📊 SPY 상대 성과  (최근 20일 — 분할매수 추가 여부 판단)")
+        print(f"\n  📊 SPY 상대 성과  (최근 20일)")
         print(f"  {ticker:<6} {stock_ret_20d:+.1f}%  /  SPY {spy_ret_20d:+.1f}%  /  초과: {rel:+.1f}%")
         if stock_ret_20d < 0 and spy_ret_20d < 0 and abs(rel) < 3:
-            print(f"  → 시장 전반 하락 동조 — 분할매수 유효 (시장 반등 시 함께 회복)")
+            print(f"  → 시장 전반 하락 동조 — 분할매수 유효")
         elif rel < -5:
             print(f"  → ⚠️  개별 종목 문제 ({rel:.1f}% 언더퍼폼) — 원인 확인 후 추가 매수")
         elif rel > 5:
@@ -696,64 +756,52 @@ def analyze_portfolio(ticker, capital, holding='3m'):
         else:
             print(f"  ✅ 유동성 양호  ({effective_capital / avg_dollar_vol * 100:.2f}%)")
 
-    # 익절 전략
-    tp_sell_pcts = [30, 30, 40] if len(tps) >= 2 else [50, 50]
+    # 리스크 / 보상 — EV 기반
     print(f"\n{DASH}")
-    print(f"  🎯 익절 전략")
+    print(f"  📊 리스크 / 보상 — 기대값(EV) 분석")
+    print(f"     근거: Aronson(2006) 컨플루언스 기반 승률 추정 + Half-Kelly")
     print(f"{DASH}")
-    for i, (tp, sp) in enumerate(zip(tps, tp_sell_pcts)):
-        print(f"  {i+1}차 (+{int(tp_pcts[i]*100)}%)  : ${tp}  →  보유의 {sp}% 매도")
-    print(f"  최종 익절 : ${tp_final}  →  전량 매도  ({tp_label})")
-    print(f"  추적 손절 : 신고점 후 ATR×{trail_mult} 하락 시 전량")
-    if trail_stop:
-        print(f"             현재 기준 초기값: ${trail_stop}")
+    if rr and ev is not None:
+        ev_lbl  = '양호 ✅' if ev > 3 else '보통 🟡' if ev > 0 else '음수 🔴 진입 비추천'
+        rr_req  = '충족 ✅' if rr >= params['rr_min'] else f"미달 🔴 (최소 {params['rr_min']}:1 필요)"
+        print(f"  R/R 비율     : {rr}:1  →  {rr_label}  ({rr_req})")
+        print(f"  예상 수익    : +{tp_upside:.1f}%  ({tp_label})")
+        print(f"  최대 손실    : −{risk_pct}%  (ATR×2.0 손절)")
+        print(f"  추정 승률    : {wp:.0%}  (컨플루언스 신호 {_pre_score:+d}점 기준)")
+        print(f"  기대값(EV)   : {ev:+.1f}%  →  {ev_lbl}")
+        print(f"  손익분기 승률: {breakeven_wr}%  (이 이상 맞아야 플러스EV)")
+    if hk_pct is not None:
+        k_lbl = ('적정' if 0 < hk_pct <= 25 else
+                 '과도 — 축소 권장' if hk_pct > 25 else '진입 비추천 (기대값 음수)')
+        print(f"  하프켈리 비중: {hk_pct}%  (${hk_amt:,.0f})  →  {k_lbl}")
 
-    # 손절 & 재진입
-    print(f"\n{DASH}")
-    print(f"  🛑 손절 & 재진입")
-    print(f"{DASH}")
-    if stop_loss:
-        print(f"  손절 트리거 : 종가 ${stop_loss} 이탈 시 즉시 전량 매도")
-        print(f"              (장중 일시 이탈 무시 — 종가 기준)")
-    print(f"  재진입      : 손절 후 2주 대기 → quant 재실행 후 상위권이면 재매수")
-    print(f"  퇴출        : quant 순위 이탈 시 익절 여부 무관하게 매도")
-
-    # 모니터링
-    print(f"\n{DASH}")
-    print(f"  🔄 모니터링 & 리밸런싱")
-    print(f"{DASH}")
-    print(f"  보유기간 : {params['label']}  |  다음 점검: {rebal}")
-    print(f"  주기     : {params['monitor']}")
-    print(f"  점검     : ① quant 순위  ② 실적 후 EPS/매출  ③ 섹터 뉴스")
-    print(f"  매도신호 : 순위이탈 / 손절선이탈 / 펀더멘털 훼손")
-
-    # 시나리오 분석 (스트레스 테스트)
+    # 시나리오 분석 (Beta 기반)
     if beta is not None:
         print(f"\n{DASH}")
-        print(f"  📉 시나리오 분석  (Beta={beta:.2f} 기반 — 시장 충격 시 예상 손익)")
-        print(f"     ※ Beta란? 시장(SPY)이 1% 변할 때 이 주식이 {beta:.1f}% 변하는 경향")
+        print(f"  📉 베타 시나리오  (Beta={beta:.2f} — 시장 충격 시 예상 손익)")
         print(f"{DASH}")
         scenarios = [
             (-0.20, '약세장 −20%',  '금융위기 수준'),
             (-0.10, '조정장 −10%',  '일반적 조정'),
-            (-0.05, '소폭 하락 −5%','단기 조정'),
-            (+0.05, '소폭 상승 +5%','정상 상승'),
-            (+0.10, '강세 랠리+10%','모멘텀 장'),
+            (-0.05, '소폭 하락 −5%', '단기 조정'),
+            (+0.05, '소폭 상승 +5%', '정상 상승'),
+            (+0.10, '강세 랠리+10%', '모멘텀 장'),
         ]
         print(f"  {'시나리오':<16} {'예상 등락':>9}  {'예상가':>8}  {'포지션 손익':>13}")
         print(f"  {'─'*15} {'─'*9} {'─'*8} {'─'*13}")
+        est_shares = max(1, int(effective_capital // price))
         for mkt_chg, label, _ in scenarios:
             stock_chg = mkt_chg * beta
             new_price = round(price * (1 + stock_chg), 2)
-            pnl = round((new_price - price) * total_shares, 2)
+            pnl = round((new_price - price) * est_shares, 2)
             pct = round(stock_chg * 100, 1)
             icon = '📈' if mkt_chg > 0 else '📉'
             print(f"  {icon} {label:<14} {pct:>+8.1f}%  ${new_price:>7.2f}  ${pnl:>+12,.0f}")
         if stop_loss and beta != 0:
             mkt_drop_for_stop = round((stop_loss / price - 1) / beta * 100, 1)
-            print(f"\n  ⚠️  손절 도달 조건: 시장이 약 {mkt_drop_for_stop:.1f}% 하락하면 손절가(${stop_loss}) 도달")
+            print(f"\n  ⚠️  손절 조건: 시장 약 {mkt_drop_for_stop:.1f}% 하락 시 손절가(${stop_loss}) 도달")
 
-    # ── Go/No-Go 판정 (눈에 띄게) ─────────────────────────────────
+    # Go/No-Go 판정
     signals, score, verdict, vemoji = _go_no_go(
         rsi_val, macd_bull, rr, regime, vix_val,
         days_until_earnings, pos52, hk_pct
@@ -770,50 +818,29 @@ def analyze_portfolio(ticker, capital, holding='3m'):
         print(f"  {sig_name:<26} {icon}  {sig_detail}")
     print(f"  {BORDER}")
 
-    # ── 매수 전 체크리스트 ─────────────────────────────────────────
+    # 모니터링 & 이벤트 캘린더
     print(f"\n{DASH}")
-    print(f"  ✅ 매수 전 개인 체크리스트")
-    print(f"     (판정과 관계없이 스스로 확인해야 할 질문들)")
+    print(f"  🔄 모니터링 & 이벤트 캘린더  (90일 이내)")
     print(f"{DASH}")
-    checks = []
-    if days_until_earnings is not None and 0 <= days_until_earnings <= 14:
-        checks.append(('⚠️', f'실적이 {days_until_earnings}일 후입니다 — 결과 예측 가능하신가요?'))
-    else:
-        checks.append(('☐', '다음 실적 발표 날짜를 알고 있나요?'))
-    if rsi_val and rsi_val > 70:
-        checks.append(('⚠️', 'RSI 과매수 — 지금 쫓아가는 매수가 아닌지 확인했나요?'))
-    else:
-        checks.append(('☐', '매수 이유가 단순 상승 추격이 아닌 실질 근거가 있나요?'))
-    if rr and rr < 1.5:
-        checks.append(('⚠️', f'R/R={rr}:1 — 잠재 수익({upside_pct}%)이 손실({risk_pct}%)보다 충분히 큰가요?'))
-    else:
-        checks.append(('☐', '손절가 도달 시 감정적으로 버틸 수 있나요?'))
-    if pos52 and pos52 > 80:
-        checks.append(('⚠️', f'52주 고점({pos52}%) — 고점에서 매수하는 이유가 있나요?'))
-    else:
-        checks.append(('☐', '이 종목이 내 포트폴리오에서 몇 %인지 계산했나요?'))
-    checks.append(('☐', '손절 후 2주 관망하고 재진입 원칙을 지킬 자신이 있나요?'))
-    for icon, question in checks:
-        print(f"  {icon}  {question}")
+    print(f"  보유기간 : {params['label']}  |  다음 점검: {rebal}")
+    print(f"  주기     : {params['monitor']}")
+    print(f"  매도신호 : 순위이탈 / 손절선이탈 / 펀더멘털 훼손")
 
-    # ── 손실 회복 분석 ─────────────────────────────────────────────
-    if stop_loss and risk_pct:
-        print(f"\n{DASH}")
-        print(f"  🔄 손실 회복 분석  (손절 후 심리 준비)")
-        print(f"{DASH}")
-        loss_pct = risk_pct
-        recovery_needed = round(loss_pct / (1 - loss_pct / 100) if loss_pct < 100 else 0, 1)
-        print(f"  손절 시 손실  : −{loss_pct}%")
-        print(f"  본전 회복 위해: 손절 후 +{recovery_needed}% 상승 필요")
-        print(f"                 ※ 10% 잃으면 11.1%를 벌어야 본전이 되는 구조")
-        if vol_val:
-            days_to_recover = round(recovery_needed / (vol_val / 252**0.5), 0)
-            print(f"  통계적 회복   : 연간변동성 {vol_val}% 기준 약 {int(days_to_recover)}거래일")
-            print(f"                 ※ 변동성 기준 평균 소요. 추세에 따라 크게 달라짐")
+    events = _get_upcoming_events(info, raw_dividends, earnings_date, days_ahead=90)
+    if events:
+        print(f"\n  {'날짜':<12} {'D-Day':>6}  {'카테고리':<10} {'이벤트':<24} {'범위':<6}")
+        print(f"  {'─'*11} {'─'*6}  {'─'*9} {'─'*23} {'─'*5}")
+        for ev in events:
+            dday_str = f"D-{ev['dday']}" if ev['dday'] > 0 else "D-Day"
+            scope_str = '종목' if ev['scope'] == '종목' else '거시'
+            warn = ' ⚠️' if ev['dday'] <= 7 else ''
+            print(f"  {ev['date'].strftime('%Y-%m-%d'):<12} {dday_str:>6}  "
+                  f"{ev['icon']} {ev['cat']:<8} {ev['name']:<24} {scope_str}{warn}")
+    else:
+        print(f"  (90일 이내 주요 이벤트 없음)")
 
     print(f"\n  ⚠️  참고용이며 투자 권유가 아닙니다.")
     print(f"     데이터: yfinance  |  기준일: {pd.Timestamp.now().strftime('%Y-%m-%d')}")
-    print(f"     용어 설명 → 메뉴에서 모드 4 선택")
     print(f"{SEP}\n")
 
 
@@ -860,33 +887,94 @@ def build_portfolio(capital, sectors=None):
             if hist.index.tz is not None:
                 hist.index = hist.index.tz_convert(None)
 
-            close = hist['Close']
-            price = round(float(close.iloc[-1]), 2)
-            mom_3m  = (round((close.iloc[-1] / close.iloc[-63] - 1) * 100, 1)
+            close   = hist['Close']
+            price   = round(float(close.iloc[-1]), 2)
+            # J&T 1993: 12-1개월 모멘텀
+            mom_12  = (round((close.iloc[-1] / close.iloc[-252] - 1) * 100, 1)
+                       if len(close) >= 252 else
+                       round((close.iloc[-1] / close.iloc[0] - 1) * 100, 1))
+            # 3개월 모멘텀 (단기 확인)
+            mom_3   = (round((close.iloc[-1] / close.iloc[-63] - 1) * 100, 1)
                        if len(close) >= 63 else None)
             rsi_val = _rsi(close)
             atr_val = _atr(hist)
             vol_val = _ann_vol(close)
-            ma200    = close.rolling(200).mean()
-            above_ma = (price > float(ma200.iloc[-1])
-                        if len(close) >= 200 and pd.notna(ma200.iloc[-1]) else None)
+            ma200   = close.rolling(200).mean()
+            ma50    = close.rolling(50).mean()
+            above_ma  = (price > float(ma200.iloc[-1])
+                         if len(close) >= 200 and pd.notna(ma200.iloc[-1]) else None)
+            above_ma50 = (price > float(ma50.iloc[-1])
+                          if len(close) >= 50 and pd.notna(ma50.iloc[-1]) else None)
+            ma_slope  = (float(ma200.iloc[-1]) > float(ma200.iloc[-20])
+                         if len(close) >= 200 and pd.notna(ma200.iloc[-20]) else None)
+
+            # SPY 3개월 수익률 대비 상대 강도
+            spx_3m = None
+            try:
+                sp_hist = yf.Ticker('^GSPC').history(period='3mo')
+                if not sp_hist.empty:
+                    spx_3m = round(
+                        (float(sp_hist['Close'].iloc[-1]) / float(sp_hist['Close'].iloc[0]) - 1) * 100, 1)
+            except Exception:
+                pass
+
             sector_name = next((s for s, ts in WATCHLIST.items() if ticker in ts), 'N/A')
 
-            score = 0
-            if mom_3m is not None:
-                score += min(40, max(0, int(mom_3m + 20)))
-            if rsi_val:
-                if 40 <= rsi_val <= 65:
-                    score += 30
-                elif 30 <= rsi_val < 40 or 65 < rsi_val <= 75:
-                    score += 15
+            # ── 다중 팩터 스코어링 (총 100점) ──────────────────────────────
+            # 1. 추세 정렬 40점 (Faber 2007: 200MA 기반)
+            trend_score = 0
             if above_ma:
-                score += 30
+                trend_score += 22
+            if above_ma50:
+                trend_score += 10
+            if ma_slope:
+                trend_score += 8
+
+            # 2. 모멘텀 팩터 35점 (J&T 1993: 12-1개월)
+            mom_12_score = max(0, min(20, int((mom_12 + 10) / 4.5))) if mom_12 is not None else 0
+            mom_3_score  = (max(0, min(15, int((mom_3 + 15) / 3))) if mom_3 is not None else 0)
+
+            # 3. 기술적 품질 15점
+            tech_score = 0
+            if rsi_val:
+                if 45 <= rsi_val <= 65:
+                    tech_score += 10
+                elif (38 <= rsi_val < 45) or (65 < rsi_val <= 72):
+                    tech_score += 5
+            if _macd_signal(close):
+                tech_score += 5
+
+            # 4. SPY 상대 강도 보너스 10점
+            rs_bonus = 0
+            if spx_3m is not None and mom_3 is not None:
+                rel_rs = mom_3 - spx_3m
+                if rel_rs > 5:
+                    rs_bonus = 10
+                elif rel_rs > 0:
+                    rs_bonus = 5
+
+            score = trend_score + mom_12_score + mom_3_score + tech_score + rs_bonus
+
+            # 패널티
+            if rsi_val and rsi_val > 78:
+                score -= 15
+            h52 = stock.info.get('fiftyTwoWeekHigh') if hasattr(stock, 'info') else None
+            l52 = stock.info.get('fiftyTwoWeekLow')  if hasattr(stock, 'info') else None
+            pos52 = (round((price - l52) / (h52 - l52) * 100, 1)
+                     if (h52 and l52 and h52 != l52) else None)
+            if pos52 and pos52 > 92:
+                score -= 8
+
+            score = max(0, min(100, score))
 
             results.append({'ticker': ticker, 'sector': sector_name, 'price': price,
-                             'mom_3m': mom_3m, 'rsi': rsi_val, 'above_ma': above_ma,
-                             'atr': atr_val, 'vol': vol_val, 'score': score})
-            print(f"  ✓ {ticker:<6} 점수: {score}/100")
+                             'mom_12': mom_12, 'mom_3': mom_3, 'rsi': rsi_val,
+                             'above_ma': above_ma, 'atr': atr_val, 'vol': vol_val,
+                             'score': score,
+                             'trend': trend_score, 'momentum': mom_12_score + mom_3_score,
+                             'tech': tech_score, 'rs': rs_bonus})
+            print(f"  ✓ {ticker:<6} 점수: {score:>3}/100  "
+                  f"(추세:{trend_score} 모멘텀:{mom_12_score+mom_3_score} 기술:{tech_score} RS:{rs_bonus})")
         except Exception:
             print(f"  ✗ {ticker:<6} 오류 — 건너뜀")
 
@@ -908,16 +996,17 @@ def build_portfolio(capital, sectors=None):
 
     print(f"\n{DASH}")
     print(f"  📊 포트폴리오 추천 — 상위 {n}종목")
+    print(f"     스코어링: 추세40 + 모멘텀35 + 기술15 + SPY-RS10")
     print(f"{DASH}")
-    print(f"  {'티커':<7} {'섹터':<9} {'현재가':>8} {'3M수익':>8} {'RSI':>6} "
-          f"{'200MA':>7} {'변동성':>7} {'배분':>10}")
-    print(f"  {'─'*6} {'─'*8} {'─'*8} {'─'*8} {'─'*6} {'─'*7} {'─'*7} {'─'*10}")
+    print(f"  {'티커':<7} {'섹터':<9} {'현재가':>8} {'12M':>7} {'3M':>7} {'RSI':>6} "
+          f"{'200MA':>7} {'점수':>5} {'배분':>10}")
+    print(f"  {'─'*6} {'─'*8} {'─'*8} {'─'*7} {'─'*7} {'─'*6} {'─'*7} {'─'*5} {'─'*10}")
     for r in selected:
-        ma_str  = '위✅' if r['above_ma'] else '아래❌' if r['above_ma'] is not None else 'N/A'
-        mom_str = f"{r['mom_3m']:+.1f}%" if r['mom_3m'] is not None else 'N/A'
-        vol_str = f"{r['vol']:.1f}%" if r['vol'] else 'N/A'
-        print(f"  {r['ticker']:<7} {r['sector']:<9} ${r['price']:>7.2f} {mom_str:>8} "
-              f"{r['rsi']:>6.1f} {ma_str:>7} {vol_str:>7} ${alloc_per:>9,.0f}")
+        ma_str   = '위✅' if r['above_ma'] else '아래❌' if r['above_ma'] is not None else 'N/A'
+        mom12str = f"{r['mom_12']:+.1f}%" if r['mom_12'] is not None else 'N/A'
+        mom3str  = f"{r['mom_3']:+.1f}%"  if r['mom_3']  is not None else 'N/A'
+        print(f"  {r['ticker']:<7} {r['sector']:<9} ${r['price']:>7.2f} {mom12str:>7} {mom3str:>7} "
+              f"{r['rsi']:>6.1f} {ma_str:>7} {r['score']:>5} ${alloc_per:>9,.0f}")
 
     alloc_note = (f"  (VIX축소 / 원래 ${capital/n:,.0f})" if vix_mult < 1.0 and n > 0 else "")
     print(f"\n  총 투자금: ${capital:,.0f}  |  종목당 배분: ${alloc_per:,.0f}{alloc_note}")
@@ -952,21 +1041,18 @@ def build_portfolio(capital, sectors=None):
 
 if __name__ == '__main__':
     print(f"\n{SEP}")
-    print(f"  💼  개인 매매 플랜 생성기  v4")
-    print(f"  실적경고 · 시장국면 · VIX조절 · Go/No-Go · 펀더멘털 · 시나리오분석 · 체크리스트")
+    print(f"  💼  개인 매매 플랜 생성기  v5")
+    print(f"  EV기반R/R · 보유기간적합도 · 이벤트캘린더 · 베타시나리오 · Go/No-Go")
     print(f"{SEP}")
     print(f"\n  모드 선택:")
     print(f"  1. 단일 종목 분석  (티커 → 상세 매매 플랜 + 펀더멘털)")
     print(f"  2. 포트폴리오 구성 (반도체/소프트웨어/헬스케어 자동 추천)")
-    print(f"  3. 투자 방법론    (ATR·하프켈리·DCA 실사례)")
-    print(f"  4. 용어 사전      (RSI·ATR·VIX·P/E·Beta 등 쉬운 설명)")
+    print(f"  3. 투자 방법론    (ATR·EV·하프켈리·모멘텀 실사례)")
 
-    mode = input("\n선택 (1/2/3/4): ").strip()
+    mode = input("\n선택 (1/2/3): ").strip()
 
     if mode == '3':
         show_methodology()
-    elif mode == '4':
-        show_glossary()
     elif mode == '2':
         capital_raw = input("💵 총 투자 금액 (USD, 예: 30000): $").strip().replace(',', '')
         try:
@@ -1006,9 +1092,9 @@ if __name__ == '__main__':
             exit()
 
         print(f"\n  보유기간:")
-        print(f"  1m — 단기(1개월): ATR×1.5 손절, 2회 분할, +8%/+15% 익절")
-        print(f"  3m — 중기(3개월): ATR×2.0 손절, 3회 분할, +10%/+20% 익절")
-        print(f"  6m — 장기(6개월): ATR×3.0 손절, 4회 분할, +20%/+40% 익절")
+        print(f"  1m — 단기(1개월): ATR×2.0 손절, 진입범위 −5%,  R/R최소 1.5:1")
+        print(f"  3m — 중기(3개월): ATR×2.0 손절, 진입범위 −8%,  R/R최소 2.0:1")
+        print(f"  6m — 장기(6개월): ATR×2.0 손절, 진입범위 −12%, R/R최소 2.5:1")
         holding_input = input("  입력 (1m/3m/6m, 기본 3m): ").strip() or '3m'
         if holding_input not in HOLDING_PARAMS:
             holding_input = '3m'

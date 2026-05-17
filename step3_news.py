@@ -155,31 +155,6 @@ DEFAULT_RISKS = [
 # 헬퍼 함수
 # ══════════════════════════════════════════════════════════════
 
-def _parse_news(raw_news):
-    items = []
-    for art in (raw_news or [])[:6]:
-        try:
-            content = art.get('content', {})
-            if content and isinstance(content, dict):
-                title  = content.get('title', '제목 없음') or '제목 없음'
-                ts     = content.get('pubDate', '')
-                date   = str(ts)[:10]
-                prov   = content.get('provider', {})
-                source = prov.get('displayName', '') if isinstance(prov, dict) else ''
-                url_d  = content.get('canonicalUrl', {})
-                link   = url_d.get('url', '') if isinstance(url_d, dict) else ''
-            else:
-                title  = art.get('title', '제목 없음') or '제목 없음'
-                ts     = art.get('providerPublishTime', '')
-                date   = (pd.Timestamp(ts, unit='s').strftime('%Y-%m-%d')
-                          if isinstance(ts, (int, float)) and ts else str(ts)[:10])
-                source = art.get('publisher', '') or ''
-                link   = art.get('link', '') or ''
-            items.append({'title': title, 'date': date, 'source': source, 'link': link})
-        except Exception:
-            continue
-    return items
-
 
 def _parse_eps(raw_eps):
     """EPS history 파싱 → (next_date_str, [past_quarters])"""
@@ -242,6 +217,81 @@ def _ts_to_date(ts):
         return pd.Timestamp(int(ts), unit='s').strftime('%Y-%m-%d')
     except Exception:
         return 'N/A'
+
+
+def _get_macro_sentiment():
+    """BLS 공개 API v1으로 최근 CPI(YoY%)·NFP(MoM 천명) fetch. 실패 시 None."""
+    import urllib.request, json as _json
+    result = {'cpi_yoy': None, 'nfp_mom': None, 'rate': None}
+
+    # CPI All Urban Consumers — YoY% 계산
+    try:
+        url = 'https://api.bls.gov/publicAPI/v1/timeseries/data/CUSR0000SA0'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = _json.loads(r.read())
+        if data.get('status') == 'REQUEST_SUCCEEDED':
+            series = data['Results']['series'][0]['data']
+            if len(series) >= 13:
+                result['cpi_yoy'] = round(
+                    float(series[0]['value']) / float(series[12]['value']) * 100 - 100, 1)
+    except Exception:
+        pass
+
+    # NFP Total Nonfarm Payrolls — MoM 변화 (천명)
+    try:
+        url = 'https://api.bls.gov/publicAPI/v1/timeseries/data/CES0000000001'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = _json.loads(r.read())
+        if data.get('status') == 'REQUEST_SUCCEEDED':
+            series = data['Results']['series'][0]['data']
+            if len(series) >= 2:
+                result['nfp_mom'] = int(
+                    round(float(series[0]['value']) - float(series[1]['value'])))
+    except Exception:
+        pass
+
+    # 현재 금리 수준 — 3개월 T-bill (Fed funds rate 근사값)
+    try:
+        h = yf.Ticker('^IRX').history(period='5d')
+        if not h.empty:
+            result['rate'] = round(float(h['Close'].iloc[-1]), 2)
+    except Exception:
+        pass
+
+    return result
+
+
+def _macro_signal(category, sentiment):
+    """카테고리 + 최근 데이터로 신호 (dot색, 라벨, 설명) 반환."""
+    cpi = sentiment.get('cpi_yoy')
+    nfp = sentiment.get('nfp_mom')
+    rate = sentiment.get('rate')
+
+    if category == '금리':
+        rate_str = f' (현재 {rate:.2f}%)' if rate else ''
+        return '#e74c3c', '⚠️ 양방향', f'금리 방향 미결정{rate_str}'
+
+    if category == '인플레이션':
+        if cpi is None:
+            return '#95a5a6', '─ 데이터없음', '최근 CPI 조회 실패'
+        if cpi > 3.5:
+            return '#e74c3c', '🔴 위험', f'최근 CPI {cpi}% (Fed 목표 초과)'
+        if cpi > 2.5:
+            return '#e67e22', '🟡 주의', f'최근 CPI {cpi}% (목표 근접)'
+        return '#27ae60', '🟢 양호', f'최근 CPI {cpi}% (목표 이내)'
+
+    if category == '고용':
+        if nfp is None:
+            return '#95a5a6', '─ 데이터없음', '최근 NFP 조회 실패'
+        if nfp > 200:
+            return '#27ae60', '🟢 강함', f'최근 NFP +{nfp:,}천명'
+        if nfp >= 80:
+            return '#e67e22', '🟡 보통', f'최근 NFP +{nfp:,}천명'
+        return '#e74c3c', '🔴 약함', f'최근 NFP {nfp:,}천명 (둔화)'
+
+    return '#95a5a6', '─ 중립', ''
 
 
 def _upcoming_macro(days_ahead=60):
@@ -372,60 +422,165 @@ def _dividend_block(info, raw_dividends):
     </div>'''
 
 
-def _macro_block(upcoming):
-    category_colors = {
-        '금리':       '#e74c3c',
-        '인플레이션': '#e67e22',
-        '고용':       '#3498db',
+def _unified_events_block(info, raw_dividends, next_eps_date, upcoming_macro,
+                          macro_sentiment=None):
+    """FOMC·CPI·고용·EPS·배당락일·배당지급일을 날짜순 통합 캘린더로 표시"""
+    if macro_sentiment is None:
+        macro_sentiment = {}
+    today  = pd.Timestamp.now().normalize()
+    events = []
+
+    # ── 1. 거시경제 (MACRO_CALENDAR) ─────────────────────────────
+    CAT_BADGE = {
+        '금리':       ('#e74c3c', '금리 결정'),
+        '인플레이션': ('#e67e22', 'CPI 발표'),
+        '고용':       ('#3498db', '고용지표'),
     }
-    if not upcoming:
+    CAT_TIP = {
+        '금리':       '전후 변동성 확대 — 성장주·채권 민감도 높음',
+        '인플레이션': '예상 하회 → 채권 랠리·성장주 호재 / 상회 → 역풍',
+        '고용':       '고용 강도 → 연준 금리 경로 방향 결정',
+    }
+    for ev in upcoming_macro:
+        col, short = CAT_BADGE.get(ev['category'], ('#95a5a6', ev['category']))
+        tip = CAT_TIP.get(ev['category'], '')
+        sig_col, sig_lbl, sig_desc = _macro_signal(ev['category'], macro_sentiment)
+        events.append({
+            'date': ev['date'], 'days': ev['days'],
+            'name': ev['name'], 'cat': short, 'cat_col': col,
+            'sig': '🌐 시장전체', 'tip': tip,
+            'sig_col': sig_col, 'sig_lbl': sig_lbl, 'sig_desc': sig_desc,
+        })
+
+    # ── 2. EPS 실적 발표일 ────────────────────────────────────────
+    if next_eps_date:
+        try:
+            d = pd.Timestamp(next_eps_date)
+            if d >= today:
+                events.append({
+                    'date': d, 'days': (d - today).days,
+                    'name': '실적 발표 (EPS)', 'cat': '실적', 'cat_col': '#8e44ad',
+                    'sig': '🎯 종목직접',
+                    'tip': 'EPS 서프라이즈 → 호재 / 미스 → 악재 — 주가 방향 결정 이벤트',
+                    'sig_col': '#e67e22', 'sig_lbl': '⚠️ 양방향',
+                    'sig_desc': '발표 전 결과 불확실',
+                })
+        except Exception:
+            pass
+
+    # ── 3. 배당락일 (Ex-Dividend Date) ───────────────────────────
+    ex_ts = info.get('exDividendDate')
+    if ex_ts:
+        try:
+            d = pd.Timestamp(int(ex_ts), unit='s').normalize()
+            if d >= today:
+                events.append({
+                    'date': d, 'days': (d - today).days,
+                    'name': '배당락일 (Ex-Dividend Date)',
+                    'cat': '배당락', 'cat_col': '#f39c12',
+                    'sig': '💰 배당이벤트',
+                    'tip': '이 날 이전 매수 완료 필요 — 이후 매수 시 배당 미수령 ⚠️',
+                    'sig_col': '#e67e22', 'sig_lbl': '🟡 주의',
+                    'sig_desc': '이전 매수 완료 필요',
+                })
+        except Exception:
+            pass
+
+    # ── 4. 배당 지급일 (직전 주기 기반 추정) ──────────────────────
+    has_div = isinstance(raw_dividends, pd.Series) and not raw_dividends.empty
+    if has_div and len(raw_dividends) >= 2:
+        try:
+            idx = raw_dividends.index
+            if hasattr(idx, 'tz') and idx.tz is not None:
+                idx = idx.tz_convert(None)
+            intervals  = [(idx[i] - idx[i - 1]).days for i in range(1, min(5, len(idx)))]
+            avg_iv     = round(sum(intervals) / len(intervals))
+            last_pay   = pd.Timestamp(idx[-1]).normalize()
+            est_next   = last_pay + pd.Timedelta(days=avg_iv)
+            if est_next >= today:
+                amt = float(raw_dividends.iloc[-1])
+                events.append({
+                    'date': est_next, 'days': (est_next - today).days,
+                    'name': f'배당 지급 예정  (${amt:.4f} / 주)',
+                    'cat': '배당지급', 'cat_col': '#27ae60',
+                    'sig': '💰 배당이벤트',
+                    'tip': '배당금 계좌 입금 예정 (주기 기반 추정 — 실제 일정 확인 권장)',
+                    'sig_col': '#27ae60', 'sig_lbl': '🟢 긍정',
+                    'sig_desc': '배당금 입금 예정',
+                })
+        except Exception:
+            pass
+
+    if not events:
         last_cal = max(pd.Timestamp(r[0]) for r in MACRO_CALENDAR)
-        if last_cal < pd.Timestamp.now().normalize():
-            msg   = f'캘린더 만료 ({last_cal.strftime("%Y-%m-%d")} 이후 데이터 없음) — MACRO_CALENDAR 업데이트 필요'
-            p_col = '#e74c3c'
-        else:
-            msg   = '향후 60일 이내 주요 일정 없음'
-            p_col = '#95a5a6'
+        expired  = last_cal < today
+        msg = (f'캘린더 만료 ({last_cal.strftime("%Y-%m-%d")} 이후 데이터 없음) — MACRO_CALENDAR 업데이트 필요'
+               if expired else '향후 90일 이내 예정 이벤트 없음')
+        p_col = '#e74c3c' if expired else '#95a5a6'
         return f'''
         <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
-          <h3 style="margin:0 0 6px;font-size:14px;color:#2c3e50">🌍 향후 60일 거시경제 일정</h3>
+          <h3 style="margin:0 0 6px;font-size:14px;color:#2c3e50">📅 주요 이벤트 캘린더</h3>
           <p style="margin:0;font-size:12px;color:{p_col}">{msg}</p>
         </div>'''
 
+    events.sort(key=lambda x: x['date'])
+
     rows = ''
-    for ev in upcoming:
-        col   = category_colors.get(ev['category'], '#95a5a6')
-        d_str = ev['date'].strftime('%Y-%m-%d (%a)')
-        d_lbl = f"D+{ev['days']}" if ev['days'] > 0 else 'Today'
+    for ev in events:
+        d_str   = ev['date'].strftime('%Y-%m-%d  (%a)')
+        d_num   = ev['days']
+        d_lbl   = 'Today' if d_num == 0 else f'D+{d_num}'
+        d_col   = '#e74c3c' if d_num <= 7 else '#f39c12' if d_num <= 30 else '#2c3e50'
+        s_col   = ev.get('sig_col', '#95a5a6')
+        s_lbl   = ev.get('sig_lbl', '─')
+        s_desc  = ev.get('sig_desc', '')
+        # 신호 배경색 (투명도 낮게)
+        s_bg    = (s_col + '22') if len(s_col) == 7 else '#f4f6f7'
         rows += f'''
         <tr style="border-bottom:1px solid #ecf0f1">
-          <td style="padding:6px 10px;font-size:12px;font-weight:bold;color:#2c3e50">{d_str}</td>
-          <td style="padding:6px 10px;font-size:11px;color:gray;text-align:center">{d_lbl}</td>
-          <td style="padding:6px 10px;font-size:12px">{ev["icon"]} {ev["name"]}</td>
-          <td style="padding:6px 10px">
-            <span style="background:{col};color:white;font-size:11px;
-                         padding:2px 8px;border-radius:10px">{ev["category"]}</span>
+          <td style="padding:7px 10px;font-size:12px;font-weight:bold;
+                     color:#2c3e50;white-space:nowrap">{d_str}</td>
+          <td style="padding:7px 10px;text-align:center;white-space:nowrap">
+            <span style="font-size:12px;font-weight:bold;color:{d_col}">{d_lbl}</span>
           </td>
-          <td style="padding:6px 10px;font-size:11px;color:#7f8c8d">{ev["source"]}</td>
+          <td style="padding:7px 10px;font-size:13px;font-weight:bold;color:#2c3e50">{ev["name"]}</td>
+          <td style="padding:7px 10px;text-align:center">
+            <span style="background:{ev["cat_col"]};color:white;font-size:11px;
+                         padding:2px 10px;border-radius:10px;white-space:nowrap">{ev["cat"]}</span>
+          </td>
+          <td style="padding:7px 10px;text-align:center;white-space:nowrap">
+            <span style="background:{s_bg};color:{s_col};font-size:11px;font-weight:bold;
+                         padding:3px 9px;border-radius:10px;border:1px solid {s_col};
+                         white-space:nowrap">{s_lbl}</span>
+            <div style="font-size:10px;color:#7f8c8d;margin-top:2px">{s_desc}</div>
+          </td>
+          <td style="padding:7px 10px;font-size:11px;color:#7f8c8d;white-space:nowrap">{ev["sig"]}</td>
+          <td style="padding:7px 10px;font-size:11px;color:#555">{ev["tip"]}</td>
         </tr>'''
 
     return f'''
     <div style="background:#eaf4fb;border-radius:6px;padding:14px;margin-bottom:14px">
-      <h3 style="margin:0 0 10px;font-size:14px;color:#2c3e50">🌍 향후 60일 거시경제 주요 일정</h3>
+      <h3 style="margin:0 0 10px;font-size:14px;color:#2c3e50">
+        📅 주요 이벤트 캘린더 — 날짜순 통합 (향후 90일)
+      </h3>
       <table style="border-collapse:collapse;width:100%">
         <thead>
           <tr style="font-size:12px;color:#7f8c8d;border-bottom:2px solid #bdc3c7">
-            <th style="padding:5px 10px;text-align:left">날짜</th>
-            <th style="padding:5px 10px">D-Day</th>
-            <th style="padding:5px 10px;text-align:left">이벤트</th>
-            <th style="padding:5px 10px">카테고리</th>
-            <th style="padding:5px 10px;text-align:left">출처</th>
+            <th style="padding:6px 10px;text-align:left;white-space:nowrap">날짜</th>
+            <th style="padding:6px 10px;white-space:nowrap">D-Day</th>
+            <th style="padding:6px 10px;text-align:left">이벤트</th>
+            <th style="padding:6px 10px">카테고리</th>
+            <th style="padding:6px 10px">신호 (최근 데이터)</th>
+            <th style="padding:6px 10px">영향 범위</th>
+            <th style="padding:6px 10px;text-align:left">투자 포인트</th>
           </tr>
         </thead>
         <tbody>{rows}</tbody>
       </table>
       <p style="font-size:11px;color:#95a5a6;margin:8px 0 0">
-        ※ 2026년 일정은 추정치입니다. 실제 날짜와 ±1~2일 차이 가능. 투자 전 공식 사이트에서 확인 권장.
+        🟢 양호 / 🟡 주의 / 🔴 위험 — CPI·NFP 실제값 기반 (BLS 공개 API) &nbsp;|&nbsp;
+        FOMC는 결과 예측 불가 특성상 항상 양방향 표시 &nbsp;|&nbsp;
+        배당 지급일은 직전 주기 기반 추정값
       </p>
     </div>'''
 
@@ -552,13 +707,16 @@ def _insider_block(stock):
             name  = str(r.get('Insider',     r.get('Name',     'N/A')))
             title = str(r.get('Title',       r.get('Position', '')))[:22]
             tx    = str(r.get('Transaction', r.get('Type',     '')))
+            text  = str(r.get('Text', ''))
             val   = r.get('Value',  r.get('Amount', None))
             date  = str(r.get('Start Date',  r.get('Date',     '')))[:10]
 
-            is_buy  = any(w in tx for w in ('Purchase','Buy','Acquisition','Automatic Buy'))
-            is_sell = any(w in tx for w in ('Sale','Sell','Disposition','Automatic Sell'))
+            # Transaction 컬럼이 비어있으면 Text 컬럼에서 파싱
+            combined = tx + ' ' + text
+            is_buy  = any(w in combined for w in ('Purchase','Buy','Acquisition','Automatic Buy','Grant','Award'))
+            is_sell = any(w in combined for w in ('Sale','Sell','Disposition','Automatic Sell','Gift'))
             tx_col  = '#27ae60' if is_buy else '#e74c3c' if is_sell else '#7f8c8d'
-            tx_icon = '▲ 매수' if is_buy else '▼ 매도' if is_sell else tx[:8]
+            tx_icon = '▲ 매수' if is_buy else '▼ 매도' if is_sell else '— 기타'
 
             try:
                 val_f   = float(val) if val is not None else None
@@ -786,58 +944,6 @@ def _scenarios(info):
     return bulls[:2], bears[:2]
 
 
-def _news_block(news_items):
-    if not news_items:
-        return '''
-        <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
-          <h3 style="margin:0 0 6px;font-size:14px;color:#2c3e50">📰 최근 뉴스</h3>
-          <p style="margin:0;font-size:12px;color:#95a5a6">뉴스 데이터 없음</p>
-        </div>'''
-
-    items_html = ''
-    for i, item in enumerate(news_items, 1):
-        short = item['title'][:85] + '...' if len(item['title']) > 85 else item['title']
-        link_btn = (
-            f'<a href="{item["link"]}" target="_blank" '
-            f'style="display:inline-block;background:#2980b9;color:white;'
-            f'font-size:12px;padding:4px 14px;border-radius:4px;'
-            f'text-decoration:none;font-weight:bold">원문 보기 →</a>'
-            if item['link'] else
-            '<span style="font-size:12px;color:#95a5a6">링크 없음</span>'
-        )
-        items_html += f'''
-        <details style="margin-bottom:5px;border:1px solid #dde4e9;
-                        border-radius:6px;overflow:hidden">
-          <summary style="cursor:pointer;padding:10px 14px;background:#f8f9fa;
-                          list-style:none;outline:none;display:block">
-            <span style="font-size:12px;font-weight:bold;color:#3498db">#{i}</span>
-            &nbsp;
-            <span style="font-size:13px;color:#2c3e50">{short}</span>
-            <span style="float:right;font-size:11px;color:#95a5a6;white-space:nowrap;margin-left:8px">
-              {item["source"]} · {item["date"]}
-            </span>
-          </summary>
-          <div style="padding:12px 16px;background:#fff;border-top:1px solid #ecf0f1">
-            <p style="margin:0 0 8px;font-size:13px;color:#2c3e50;line-height:1.7">
-              {item["title"]}
-            </p>
-            <div style="font-size:12px;color:#7f8c8d;margin-bottom:10px">
-              출처: <b>{item["source"]}</b> &nbsp;|&nbsp; 날짜: <b>{item["date"]}</b>
-            </div>
-            {link_btn}
-          </div>
-        </details>'''
-
-    return f'''
-    <div style="margin-bottom:14px">
-      <h3 style="margin:0 0 8px;color:#2c3e50;font-size:14px">
-        📰 최근 뉴스 (최대 6개) — 클릭하면 펼쳐집니다
-      </h3>
-      {items_html}
-      <p style="font-size:11px;color:#95a5a6;margin-top:4px">
-        * 제목 클릭으로 펼치기 / 다시 클릭으로 접기
-      </p>
-    </div>'''
 
 
 # ══════════════════════════════════════════════════════════════
@@ -846,7 +952,6 @@ def _news_block(news_items):
 
 def analyze_news(ticker, info, raw_news,
                  raw_dividends=None, raw_eps=None, stock=None):
-    # ── Bug fix 2: summary가 None일 때 len() 오류 방지 ──────────
     summary = info.get('longBusinessSummary') or '기업 정보 없음'
     summary = summary[:250] + '...' if len(summary) > 250 else summary
 
@@ -854,21 +959,21 @@ def analyze_news(ticker, info, raw_news,
     sector   = info.get('sector') or ''
     industry = info.get('industry') or 'N/A'
 
-    analyst          = _analyst_info(stock, info)
+    analyst              = _analyst_info(stock, info)
     next_eps_dt, eps_hist = _parse_eps(raw_eps)
-    news_items       = _parse_news(raw_news)
-    upcoming         = _upcoming_macro(days_ahead=60)
-    risks            = SECTOR_RISKS.get(sector, DEFAULT_RISKS)[:4]
-    bulls, bears     = _scenarios(info)
+    upcoming             = _upcoming_macro(days_ahead=90)
+    macro_sent           = _get_macro_sentiment()
+    risks                = SECTOR_RISKS.get(sector, DEFAULT_RISKS)[:4]
+    bulls, bears         = _scenarios(info)
 
     bull_li = ''.join(f'<li style="margin:5px 0;font-size:13px">✅ {b}</li>' for b in bulls)
     bear_li = ''.join(f'<li style="margin:5px 0;font-size:13px">⚠️ {b}</li>' for b in bears)
 
     html = f'''
-    <div style="font-family:Arial,sans-serif;max-width:880px;margin-bottom:20px">
+    <div style="font-family:Arial,sans-serif;max-width:900px;margin-bottom:20px">
       <h2 style="color:#2c3e50;border-bottom:3px solid #3498db;
                  padding-bottom:8px;margin-bottom:14px">
-        📰 STEP 3 — [{ticker}] 뉴스 & 시나리오 분석
+        📰 STEP 3 — [{ticker}] 이벤트 & 시나리오 분석
       </h2>
 
       <div style="background:#f4f6f7;border-radius:6px;padding:14px;margin-bottom:14px">
@@ -881,9 +986,8 @@ def analyze_news(ticker, info, raw_news,
       {_dividend_block(info, raw_dividends)}
       {_insider_block(stock)}
       {_global_rates_block()}
-      {_macro_block(upcoming)}
+      {_unified_events_block(info, raw_dividends, next_eps_dt, upcoming, macro_sent)}
       {_sector_risk_block(sector, risks)}
-      {_news_block(news_items)}
 
       <div style="display:flex;gap:12px;margin-bottom:14px">
         <div style="flex:1;background:#eafaf1;border-left:5px solid #27ae60;

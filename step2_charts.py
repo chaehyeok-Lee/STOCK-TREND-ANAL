@@ -18,7 +18,8 @@ except ImportError:
 plt.rcParams['font.family'] = 'Malgun Gothic'
 plt.rcParams['axes.unicode_minus'] = False
 
-MA_COLORS = {50: '#3498db', 100: '#e67e22', 150: '#2ecc71', 200: '#e74c3c'}
+MA_COLORS        = {50: '#3498db', 100: '#e67e22', 150: '#2ecc71', 200: '#e74c3c'}
+MA_COLORS_WEEKLY = {10: '#3498db',  20: '#e67e22',  30: '#2ecc71',  40: '#e74c3c'}  # 주봉용 (10W≈50D, 40W≈200D)
 
 
 # ── 지표 계산 ────────────────────────────────────────────────────────────────
@@ -59,9 +60,11 @@ def _bollinger(ax, close, window=20, num_std=2):
             linestyle='--', alpha=0.65)
 
 
-def _price(ax, df, spx_slice, ticker, label, use_candle):
+def _price(ax, df, spx_slice, ticker, label, use_candle, ma_windows=None):
+    if ma_windows is None:
+        ma_windows = MA_COLORS
     close = df['Close']
-    _bollinger(ax, close)          # 볼린저밴드 — MA선 아래에 먼저 그림
+    _bollinger(ax, close)
 
     if use_candle:
         up = df[df['Close'] >= df['Open']]
@@ -73,8 +76,7 @@ def _price(ax, df, spx_slice, ticker, label, use_candle):
                color='#e74c3c', width=w, alpha=0.85)
         ax.vlines(up.index, up['Low'], up['High'], color='#27ae60', linewidth=0.7)
         ax.vlines(dn.index, dn['Low'], dn['High'], color='#c0392b', linewidth=0.7)
-        ax.set_title(f'[{ticker}] {label}  ·  캔들차트 + 이동평균선',
-                     fontsize=11, fontweight='bold', pad=6)
+        ax.set_title(f'[{ticker}]  {label}', fontsize=11, fontweight='bold', pad=6)
     else:
         ax.plot(df.index, close, color='#2c3e50', alpha=0.2, linewidth=0.8, label='종가')
         if spx_slice is not None and len(spx_slice) > 5:
@@ -83,14 +85,14 @@ def _price(ax, df, spx_slice, ticker, label, use_candle):
                 norm = spx_a / spx_a.iloc[0] * close.iloc[close.index.get_loc(spx_a.index[0])]
                 ax.plot(norm.index, norm, color='#8e44ad', linewidth=1.2,
                         linestyle='--', label='S&P500 (정규화)', alpha=0.8)
-        ax.set_title(f'[{ticker}] {label}  ·  이동평균선 + S&P500 비교',
-                     fontsize=11, fontweight='bold', pad=6)
+        ax.set_title(f'[{ticker}]  {label}', fontsize=11, fontweight='bold', pad=6)
 
-    for w_ma, c in MA_COLORS.items():
+    for w_ma, c in ma_windows.items():
         if len(close) >= w_ma:
             ma = close.rolling(w_ma).mean()
+            suffix = 'W' if ma_windows is MA_COLORS_WEEKLY else 'MA'
             ax.plot(df.index, ma, color=c, linewidth=1.4,
-                    label=f'{w_ma}MA', alpha=0.85)
+                    label=f'{w_ma}{suffix}', alpha=0.85)
 
     ax.legend(fontsize=8, loc='upper left', ncol=4)
     ax.grid(True, alpha=0.2)
@@ -257,7 +259,7 @@ def _rsi_plot(ax, df):
 
 # ── 기간별 차트 1개 ──────────────────────────────────────────────────────────
 
-def _draw(ticker, df, spx_slice, label, use_candle):
+def _draw(ticker, df, spx_slice, label, use_candle, ma_windows=None, show_projection=True):
     fig = plt.figure(figsize=(16, 11))
     fig.suptitle(f'📈  [{ticker}]  {label}', fontsize=13, fontweight='bold', y=0.995)
 
@@ -268,8 +270,9 @@ def _draw(ticker, df, spx_slice, label, use_candle):
     ax2 = fig.add_subplot(gs[2], sharex=ax0)
     ax3 = fig.add_subplot(gs[3], sharex=ax0)
 
-    _price(ax0, df, spx_slice, ticker, label, use_candle)
-    _slope_projection(ax0, df)
+    _price(ax0, df, spx_slice, ticker, label, use_candle, ma_windows)
+    if show_projection:
+        _slope_projection(ax0, df)
     _volume(ax1, df)
     _macd_plot(ax2, df)
     _rsi_plot(ax3, df)
@@ -476,20 +479,19 @@ def _slope_summary_html(df, ticker, spx_close=None, n_slope=10):
 
 # ── 토글 차트 (3년/5년용) ────────────────────────────────────────────────────
 
-def _toggle_chart(ticker, df, spx_close, label, use_candle):
+def _toggle_chart(ticker, df, spx_close, label, use_candle, ma_windows=None, show_projection=True):
     """ipywidgets 버튼으로 펼치기/접기 가능한 차트"""
     if not _WIDGETS_OK:
-        # ipywidgets 없으면 그냥 출력
         spx_slice = (spx_close[spx_close.index >= df.index[0]]
                      if spx_close is not None else None)
-        _draw(ticker, df, spx_slice, label, use_candle)
+        _draw(ticker, df, spx_slice, label, use_candle, ma_windows, show_projection)
         return
 
     btn = widgets.ToggleButton(
         value=False,
         description=f'📊 {label} 보기',
         button_style='info',
-        layout=widgets.Layout(width='380px', height='38px'),
+        layout=widgets.Layout(width='420px', height='38px'),
     )
     out      = widgets.Output()
     rendered = [False]
@@ -501,7 +503,7 @@ def _toggle_chart(ticker, df, spx_close, label, use_candle):
                 spx_slice = (spx_close[spx_close.index >= df.index[0]]
                              if spx_close is not None else None)
                 with out:
-                    _draw(ticker, df, spx_slice, label, use_candle)
+                    _draw(ticker, df, spx_slice, label, use_candle, ma_windows, show_projection)
                 rendered[0] = True
             out.layout.display = ''
         else:
@@ -511,6 +513,16 @@ def _toggle_chart(ticker, df, spx_close, label, use_candle):
     out.layout.display = 'none'
     btn.observe(on_toggle, names='value')
     ipy_display(btn, out)
+
+
+def _resample_weekly(df):
+    """일봉 → 주봉(週봉) OHLCV 집계"""
+    cols = {c: c for c in ['Open', 'High', 'Low', 'Close', 'Volume'] if c in df.columns}
+    agg  = {cols['Open']: 'first', cols['High']: 'max',
+            cols['Low']:  'min',   cols['Close']: 'last'}
+    if 'Volume' in cols:
+        agg[cols['Volume']] = 'sum'
+    return df.resample('W-FRI').agg(agg).dropna(subset=[cols['Close']])
 
 
 # ── 메인 함수 ────────────────────────────────────────────────────────────────
@@ -538,24 +550,32 @@ def analyze_charts(ticker, history_5y, spx_5y=None):
     now   = history_5y.index[-1]
     df_1y = history_5y[history_5y.index >= now - pd.DateOffset(years=1)]
     df_3y = history_5y[history_5y.index >= now - pd.DateOffset(years=3)]
-    df_5y = history_5y
 
     print(f'\n📈 STEP 2 — [{ticker}] 기술적 차트 분석\n')
 
-    # 1년 차트 바로 출력
+    # ── 1년 차트: 일봉 캔들 (직접 출력) ─────────────────────────
     if not df_1y.empty:
         spx_1y = (spx_close[spx_close.index >= df_1y.index[0]]
                   if spx_close is not None else None)
-        _draw(ticker, df_1y, spx_1y, '1년 — 단기·중기 트렌드', True)
+        _draw(ticker, df_1y, spx_1y,
+              '1년  ·  일봉  |  50 / 100 / 150 / 200 MA  +  볼린저밴드',
+              True)
         display(HTML(_slope_summary_html(df_1y, ticker, spx_close=spx_close)))
-        print('  ✅ 1년 차트 출력 완료')
+        print('  ✅ 1년 일봉 차트 완료')
     else:
         print('  ⚠️ 1년: 데이터 부족')
 
-    # 3년 / 5년 차트 — 토글 버튼
-    print('\n  📁 장기 차트 (버튼을 눌러 펼치세요):')
-    for label, df in [('3년 — 중장기 퍼포먼스', df_3y), ('5년 — 장기 퍼포먼스', df_5y)]:
-        if df.empty:
-            print(f'  ⚠️ {label}: 데이터 부족 (건너뜀)')
-            continue
-        _toggle_chart(ticker, df, spx_close, label, False)
+    # ── 3년 차트: 주봉 캔들 (토글) ───────────────────────────────
+    if not df_3y.empty:
+        print('\n  📁 3년 주봉(週봉) 차트 — 버튼을 눌러 펼치세요:')
+        df_3y_w = _resample_weekly(df_3y)
+        if not df_3y_w.empty:
+            _toggle_chart(
+                ticker, df_3y_w, spx_close,
+                '3년  ·  주봉  |  10 / 20 / 30 / 40 주(週) MA',
+                True, MA_COLORS_WEEKLY, show_projection=False,
+            )
+        else:
+            print('  ⚠️ 3년 주봉: 집계 실패')
+    else:
+        print('  ⚠️ 3년: 데이터 부족')

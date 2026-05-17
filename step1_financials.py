@@ -318,51 +318,115 @@ def analyze_financials(ticker, info):
     fcf_yield  = round(fcf / mcap_v * 100, 2) if (fcf and mcap_v and mcap_v > 0) else None
     fcf_margin = round(fcf / rev_v  * 100, 2) if (fcf and rev_v  and rev_v  > 0) else None
 
-    # PEG: PER ÷ EPS성장률 (성장 대비 가격 적정성)
     peg = round(per / eps_growth, 2) if (per and eps_growth and eps_growth > 0 and per > 0) else None
 
-    # ROIC: NOPAT ÷ 투하자본 (자본 효율성 — 부채 포함 관점)
-    ebit_v     = info.get('ebit')
-    tax_rate_v = info.get('effectiveTaxRate') or 0.21
-    eq_v       = info.get('totalStockholderEquity') or 0
+    ebit_v       = info.get('ebit')
+    tax_rate_v   = info.get('effectiveTaxRate') or 0.21
+    eq_v         = info.get('totalStockholderEquity') or 0
     total_debt_v = info.get('totalDebt') or 0
     total_cash_v = info.get('totalCash') or 0
     invested_cap = eq_v + total_debt_v - total_cash_v
     roic = round(ebit_v * (1 - tax_rate_v) / invested_cap * 100, 2) if (ebit_v is not None and invested_cap > 0) else None
 
-    # 순부채/EBITDA: 레버리지 질적 지표
-    ebitda_v = info.get('ebitda')
+    ebitda_v        = info.get('ebitda')
     net_debt_ebitda = round((total_debt_v - total_cash_v) / ebitda_v, 2) if (ebitda_v and ebitda_v > 0) else None
 
-    # (label, key, val, desc)  |  key='__H__' → 섹션 헤더, val=bg색, desc=제목
-    metrics = [
-        ('__H__', '__H__', '#2c3e50',  '📊 밸류에이션'),
-        ('PER',               'PER',          per,            '주가수익비율 — 낮을수록 저평가'),
-        ('PEG',               'PEG',          peg,            'PER ÷ EPS성장률 — 1 이하=성장 대비 저평가, 2 초과=고평가'),
-        ('PSR',               'PSR',          psr,            '주가매출비율 — 낮을수록 저평가'),
-        ('PBR',               'PBR',          pbr,            '주가순자산비율 — 낮을수록 저평가'),
-        ('EV / EBITDA',       'EV_EBITDA',    ev_ebitda,      '부채 포함 기업가치 ÷ EBITDA — 자본구조 무관 밸류에이션'),
-        ('__H__', '__H__', '#27ae60',  '💰 수익성 & 현금창출'),
-        ('ROE (%)',            'ROE',          roe,            '자기자본이익률 — 높을수록 자본 효율 우수'),
-        ('ROIC (%)',           'ROIC',         roic,           'NOPAT ÷ 투하자본 — 부채 포함 자본효율, 15%↑ 우수'),
-        ('매출총이익률 (%)',    'GrossM',       gross_m,        '가격경쟁력 지표 — 원가 통제력'),
-        ('영업이익률 (%)',      'OpM',          op_m,           '핵심 사업 수익성 — 비용 통제력'),
-        ('순이익률 (%)',        'NetM',         net_m,          '최종 이익률 — 회계 조정 후 실질 수익'),
-        ('FCF 마진 (%)',        'FCFMargin',    fcf_margin,     '잉여현금흐름 ÷ 매출 — 진짜 현금창출력'),
-        ('FCF 수익률 (%)',      'FCFYield',     fcf_yield,      'FCF ÷ 시가총액 — 5%↑ 채권 대비 매력적'),
-        ('__H__', '__H__', '#3498db',  '🚀 성장성'),
-        ('매출 성장률 YoY (%)', 'RevGrowth',    rev_growth,     '전년 대비 매출 증가율 — 20%↑ 고성장주'),
-        ('EPS 성장률 YoY (%)',  'EpsGrowth',    eps_growth,     '전년 대비 주당순이익 증가율'),
-        ('__H__', '__H__', '#e67e22',  '🛡️ 재무 안정성 & 리스크'),
-        ('부채비율 D/E',        'DE',           de,             '부채÷자본 — 낮을수록 안전 (고금리 환경 특히 중요)'),
-        ('순부채/EBITDA',       'NetDebtEBITDA',net_debt_ebitda,'(총부채-현금)÷EBITDA — 2 이하=안전, 4 초과=위험'),
-        ('베타 (β)',            'Beta',         beta,           '시장 대비 변동성 — 1.0=시장동행 / 1.5↑=고변동'),
-        ('유동비율',            'CurrRatio',    curr_ratio,     '유동자산÷유동부채 — 1.0 미만 시 단기 유동성 위험'),
-    ]
-
-    # ── 섹터 ETF 피어 평균 로딩 ───────────────────────────────
     sector   = info.get('sector', '')
     industry = info.get('industry', '')
+
+    # (label, key, val, desc)  |  key='__H__' → 섹션 헤더
+    metrics = [
+        ('__H__', '__H__', '#2c3e50',  '📊 밸류에이션'),
+        ('PER',            'PER',          per,            'P/E — 낮을수록 저평가'),
+        ('PEG',            'PEG',          peg,            'PER ÷ EPS성장률 — 1↓ 저평가 · 2↑ 고평가'),
+        ('PSR',            'PSR',          psr,            'P/S — 낮을수록 저평가'),
+        ('PBR',            'PBR',          pbr,            'P/B — 낮을수록 저평가'),
+        ('EV/EBITDA',      'EV_EBITDA',    ev_ebitda,      '기업가치 ÷ EBITDA — 자본구조 중립적 밸류에이션'),
+        ('__H__', '__H__', '#27ae60',  '💰 수익성 & 현금창출'),
+        ('ROE (%)',         'ROE',          roe,            '자기자본이익률 — 15%↑ 우수'),
+        ('ROIC (%)',        'ROIC',         roic,           'NOPAT ÷ 투하자본 — 부채 포함 자본효율, 15%↑ 우수'),
+        ('매출총이익률 (%)', 'GrossM',       gross_m,        '가격경쟁력 — 원가 통제력'),
+        ('영업이익률 (%)',   'OpM',          op_m,           '핵심 사업 수익성'),
+        ('순이익률 (%)',     'NetM',         net_m,          '최종 이익률'),
+        ('FCF 마진 (%)',     'FCFMargin',    fcf_margin,     'FCF ÷ 매출 — 실질 현금창출력'),
+        ('FCF 수익률 (%)',   'FCFYield',     fcf_yield,      'FCF ÷ 시가총액 — 5%↑ 채권 대비 매력적'),
+        ('__H__', '__H__', '#3498db',  '🚀 성장성'),
+        ('매출 성장 YoY (%)', 'RevGrowth',  rev_growth,     '전년 대비 매출 증가율 — 20%↑ 고성장'),
+        ('EPS 성장 YoY (%)',  'EpsGrowth',  eps_growth,     '전년 대비 EPS 증가율'),
+        ('__H__', '__H__', '#e67e22',  '🛡️ 재무 안정성'),
+        ('D/E 부채비율',    'DE',           de,             '부채 ÷ 자본 — 낮을수록 안전'),
+        ('순부채/EBITDA',   'NetDebtEBITDA',net_debt_ebitda,'(총부채-현금) ÷ EBITDA — 2↓ 안전 · 4↑ 위험'),
+        ('베타 (β)',        'Beta',         beta,           'vs S&P500 변동성 — 1.0=시장동행 · 1.5↑=고변동'),
+        ('유동비율',        'CurrRatio',    curr_ratio,     '유동자산 ÷ 유동부채 — 1.0↓ 단기 유동성 위험'),
+    ]
+
+    # ── 모든 지표 사전 평가 (테이블 + 건강도 공용) ────────────────
+    graded = []
+    for label, key, val, desc in metrics:
+        if key == '__H__':
+            graded.append((label, key, val, desc, None, None, False))
+        else:
+            c, s, w = _grade(val, key, sector, industry)
+            graded.append((label, key, val, desc, c, s, w))
+
+    # ── 재무 건강도 점수 계산 ─────────────────────────────────────
+    real_g  = [(l, k, v, d, c, s, w) for l, k, v, d, c, s, w in graded if k != '__H__' and v is not None]
+    green   = sum(1 for *_, c, s, w in real_g if c in ('#27ae60', '#2ecc71'))
+    yellow  = sum(1 for *_, c, s, w in real_g if c in ('#f39c12', '#e67e22'))
+    total_g = len(real_g)
+    h_score = round((green * 2 + yellow) / (total_g * 2) * 100) if total_g else 50
+    h_col   = '#27ae60' if h_score >= 65 else '#f39c12' if h_score >= 45 else '#e74c3c'
+    h_lbl   = '양호' if h_score >= 65 else '보통' if h_score >= 45 else '주의'
+
+    strengths = [(l, s) for l, k, v, d, c, s, w in graded
+                 if k != '__H__' and v is not None and c in ('#27ae60', '#2ecc71')][:3]
+    concerns  = [(l, s) for l, k, v, d, c, s, w in graded
+                 if k != '__H__' and v is not None and c in ('#e74c3c', '#c0392b')][:3]
+
+    def _badge(label, status, color):
+        return (f'<span style="display:inline-block;margin:3px 2px;background:{color}20;'
+                f'border:1px solid {color};border-radius:4px;padding:3px 9px;'
+                f'font-size:11px;color:{color};font-weight:bold">{label}: {status}</span>')
+
+    str_html = ''.join(_badge(l, s, '#27ae60') for l, s in strengths) \
+               or '<span style="color:#95a5a6;font-size:12px">해당 없음</span>'
+    con_html = ''.join(_badge(l, s, '#e74c3c') for l, s in concerns) \
+               or '<span style="color:#95a5a6;font-size:12px">해당 없음</span>'
+
+    health_html = f'''
+    <div style="background:#fff;border:1px solid #dde4e9;border-radius:8px;
+                padding:16px;margin-bottom:14px">
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <div style="min-width:120px">
+          <div style="font-size:11px;color:#7f8c8d;font-weight:bold;margin-bottom:2px">재무 건강도</div>
+          <span style="font-size:32px;font-weight:bold;color:{h_col}">{h_score}</span>
+          <span style="font-size:15px;color:{h_col};font-weight:bold"> / 100</span>
+          &nbsp;<span style="background:{h_col};color:white;font-size:12px;font-weight:bold;
+                             padding:2px 10px;border-radius:20px">{h_lbl}</span>
+        </div>
+        <div style="flex:1;min-width:160px">
+          <div style="background:#ecf0f1;border-radius:99px;height:12px;overflow:hidden">
+            <div style="width:{h_score}%;background:{h_col};height:100%;border-radius:99px"></div>
+          </div>
+          <div style="font-size:10px;color:#95a5a6;margin-top:4px">
+            양호 ≥65 &nbsp;|&nbsp; 보통 45~64 &nbsp;|&nbsp; 주의 ≤44 &nbsp;|&nbsp;
+            우수(2점)·보통(1점) 지표 가중 평균
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:12px;flex-wrap:wrap">
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:11px;font-weight:bold;color:#27ae60;margin-bottom:6px">▲ 핵심 강점</div>
+          {str_html}
+        </div>
+        <div style="flex:1;min-width:220px">
+          <div style="font-size:11px;font-weight:bold;color:#e74c3c;margin-bottom:6px">▼ 주요 리스크</div>
+          {con_html}
+        </div>
+      </div>
+    </div>'''
+
+    # ── 섹터 ETF 피어 평균 로딩 ───────────────────────────────────
     etf_info = _get_sector_etf(sector, industry)
     etf_ticker = etf_name = ''
     etf_avgs = None
@@ -388,15 +452,13 @@ def analyze_financials(ticker, info):
     colspan  = 5 if has_peer else 4
 
     rows = ''
-    for label, key, val, desc in metrics:
-        # 섹션 헤더 행
+    for label, key, val, desc, color, status, _ in graded:
         if key == '__H__':
             rows += (f'<tr style="background:{val}">'
                      f'<td colspan="{colspan}" style="padding:7px 12px;color:white;'
                      f'font-weight:bold;font-size:12px;letter-spacing:0.5px">{desc}</td></tr>')
             continue
 
-        color, status, _ = _grade(val, key, sector, industry)
         val_str = 'N/A' if val is None else str(val)
 
         if has_peer:
@@ -413,19 +475,20 @@ def analyze_financials(ticker, info):
 
         rows += f'''
         <tr style="border-bottom:1px solid #ecf0f1">
-            <td style="padding:9px 12px;font-weight:bold;color:#2c3e50">{label}</td>
+            <td style="padding:9px 12px;font-weight:bold;color:#2c3e50;white-space:nowrap">{label}</td>
             <td style="padding:9px 12px;text-align:center;font-size:14px;font-weight:bold">{val_str}</td>
             <td style="padding:6px 10px;text-align:center">
                 <span style="background:{color};color:white;border-radius:5px;padding:3px 10px;
                              font-size:12px;font-weight:bold">{status}</span>
             </td>{etf_cell}
-            <td style="padding:9px 12px;font-size:11px;color:#7f8c8d">{desc}</td>
+            <td style="padding:9px 12px;font-size:11px;color:#95a5a6">{desc}</td>
         </tr>'''
 
     name   = info.get('longName') or info.get('shortName') or ticker
     price  = info.get('currentPrice') or info.get('regularMarketPrice') or 'N/A'
     mcap   = info.get('marketCap')
     mcap_s = f"${mcap/1e9:.1f}B" if mcap else 'N/A'
+    rev_s  = f"${rev_v/1e9:.1f}B" if rev_v else 'N/A'
 
     if etf_avgs is not None:
         etf_header = f'<th style="padding:10px 12px;width:13%">[{etf_ticker}] 섹터평균</th>'
@@ -434,26 +497,29 @@ def analyze_financials(ticker, info):
     else:
         etf_header = ''
         peer_note  = '섹터 피어: 미매핑'
-        max_w = '860px'
+        max_w = '900px'
 
     html = f'''
     <div style="font-family:Arial,sans-serif;max-width:{max_w};margin-bottom:30px">
       <h2 style="color:#2c3e50;border-bottom:3px solid #3498db;padding-bottom:8px;margin-bottom:14px">
         📊 STEP 1 — [{ticker}] 재무 지표 분석
       </h2>
-      <p style="margin:0 0 10px;font-size:13px;color:#555">
+      <p style="margin:0 0 12px;font-size:13px;color:#555">
         <b>{name}</b> &nbsp;|&nbsp; 섹터: <b>{sector}</b> &nbsp;|&nbsp; 산업: {industry}<br>
-        현재가: <b>${price}</b> &nbsp;|&nbsp; 시가총액: <b>{mcap_s}</b>
+        현재가: <b>${price}</b> &nbsp;|&nbsp; 시가총액: <b>{mcap_s}</b> &nbsp;|&nbsp; 연매출: <b>{rev_s}</b>
       </p>
-      <div style="background:{rc}18;border-left:5px solid {rc};padding:10px 14px;border-radius:5px;margin-bottom:14px">
+      {health_html}
+      <div style="background:{rc}18;border-left:5px solid {rc};padding:10px 14px;
+                  border-radius:5px;margin-bottom:14px">
         <span style="color:{rc};font-weight:bold;font-size:13px">{rl}</span>
       </div>
-      <table style="border-collapse:collapse;width:100%;background:#fff;border:1px solid #ecf0f1;border-radius:6px;overflow:hidden">
+      <table style="border-collapse:collapse;width:100%;background:#fff;
+                    border:1px solid #ecf0f1;border-radius:6px;overflow:hidden">
         <thead>
           <tr style="background:#2c3e50;color:white;font-size:13px">
-            <th style="padding:10px 12px;text-align:left;width:17%">지표</th>
+            <th style="padding:10px 12px;text-align:left;width:16%">지표</th>
             <th style="padding:10px 12px;width:9%">값</th>
-            <th style="padding:10px 12px;width:27%">평가</th>
+            <th style="padding:10px 12px;width:28%">평가</th>
             {etf_header}
             <th style="padding:10px 12px;text-align:left">설명</th>
           </tr>
@@ -462,7 +528,7 @@ def analyze_financials(ticker, info):
       </table>
       <p style="font-size:11px;color:#95a5a6;margin-top:6px">
         🟢 우수/저평가 &nbsp;|&nbsp; 🟡 보통 &nbsp;|&nbsp; 🔴 위험/고평가 &nbsp;|&nbsp;
-        ▲ 우위 / ▼ 열위: 섹터 평균 대비 유리/불리한 방향 &nbsp;|&nbsp;
+        ▲ 우위 / ▼ 열위: 섹터 평균 대비 &nbsp;|&nbsp;
         {peer_note} &nbsp;|&nbsp; 데이터 출처: yfinance
       </p>
     </div>
